@@ -227,5 +227,4 @@ Contributions are welcome! Please submit a [Pull Request](https://github.com/shi
 ## Acknowledgements
 
 - [BM25 (Okapi BM25)](https://en.wikipedia.org/wiki/Okapi_BM25) — The classic probabilistic ranking function
-- [jieba](https://github.com/fxsjy/jieba) — Chinese text segmentation
-- [OpenAI API](https://platform.openai.com/) — LLM reasoning backbone
+- [VectifyAI/PageIndex](https://github.com/VectifyAI/PageIndex) — Inspiration for structure-aware indexing and retrieval

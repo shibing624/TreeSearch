@@ -227,5 +227,4 @@ treesearch/
 ## 致谢
 
 - [BM25 (Okapi BM25)](https://en.wikipedia.org/wiki/Okapi_BM25) — 经典的概率排序函数
-- [jieba](https://github.com/fxsjy/jieba) — 中文分词
-- [OpenAI API](https://platform.openai.com/) — LLM 推理引擎
+- [VectifyAI/PageIndex](https://github.com/VectifyAI/PageIndex) — 为结构化索引与检索提供了启发
