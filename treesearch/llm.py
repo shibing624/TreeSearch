@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = os.getenv("TREESEARCH_MODEL", "gpt-4o-mini")
 MAX_RETRIES = 3
 
 # ---------------------------------------------------------------------------
