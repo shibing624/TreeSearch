@@ -200,7 +200,7 @@ treesearch/
 - **GitHub Issues** — [提交 issue](https://github.com/shibing624/TreeSearch/issues)
 - **微信群** — 添加微信号 `xuming624`，备注 "llm"，加入技术交流群
 
-<img src="https://github.com/shibing624/TreeSearch/blob/main/docs/assets/wechat.jpeg" width="200" />
+<img src="https://github.com/shibing624/TreeSearch/blob/main/docs/wechat.jpeg" width="200" />
 
 ## 引用
 

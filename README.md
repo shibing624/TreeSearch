@@ -200,7 +200,7 @@ treesearch/
 - **GitHub Issues** — [Submit an issue](https://github.com/shibing624/TreeSearch/issues)
 - **WeChat Group** — Add WeChat ID `xuming624`, note "llm", to join the tech group
 
-<img src="https://github.com/shibing624/TreeSearch/blob/main/docs/assets/wechat.jpeg" width="200" />
+<img src="https://github.com/shibing624/TreeSearch/blob/main/docs/wechat.jpeg" width="200" />
 
 ## Citation
 
