@@ -1,0 +1,125 @@
+{
+  "description": "Ground truth for TreeSearch benchmark. Each query has relevant document(s) and section titles.",
+  "queries": [
+    {
+      "query": "How to configure Twilio for voice calls?",
+      "relevant_docs": ["voice-call"],
+      "relevant_titles": ["Config", "Voice Call (plugin)"],
+      "difficulty": "easy"
+    },
+    {
+      "query": "How to install the voice call plugin?",
+      "relevant_docs": ["voice-call"],
+      "relevant_titles": ["Install", "Option A: install from npm (recommended)", "Option B: install from a local folder (dev, no copying)"],
+      "difficulty": "easy"
+    },
+    {
+      "query": "What TTS providers are supported for voice calls?",
+      "relevant_docs": ["voice-call"],
+      "relevant_titles": ["TTS for calls", "More examples"],
+      "difficulty": "medium"
+    },
+    {
+      "query": "How to enable inbound voice calls with an allowlist?",
+      "relevant_docs": ["voice-call"],
+      "relevant_titles": ["Inbound calls"],
+      "difficulty": "medium"
+    },
+    {
+      "query": "What CLI commands are available for voice calls?",
+      "relevant_docs": ["voice-call"],
+      "relevant_titles": ["CLI"],
+      "difficulty": "easy"
+    },
+    {
+      "query": "What is the agent voice_call tool and its actions?",
+      "relevant_docs": ["voice-call"],
+      "relevant_titles": ["Agent tool"],
+      "difficulty": "medium"
+    },
+    {
+      "query": "What is the memory architecture for workspace recall?",
+      "relevant_docs": ["memory"],
+      "relevant_titles": ["Proposed architecture (Markdown source-of-truth + derived index)", "Workspace Memory v2 (offline): research notes"],
+      "difficulty": "medium"
+    },
+    {
+      "query": "How does the retain/recall/reflect memory loop work?",
+      "relevant_docs": ["memory"],
+      "relevant_titles": ["Retain / Recall / Reflect (operational loop)", "Retain: normalize daily logs into \"facts\"", "Recall: queries over the derived index", "Reflect: produce stable pages + update beliefs"],
+      "difficulty": "medium"
+    },
+    {
+      "query": "What is the derived store for machine recall in memory system?",
+      "relevant_docs": ["memory"],
+      "relevant_titles": ["Derived store (machine recall)", "Proposed architecture (Markdown source-of-truth + derived index)"],
+      "difficulty": "hard"
+    },
+    {
+      "query": "Should I use SuCo or HNSW for memory retrieval?",
+      "relevant_docs": ["memory"],
+      "relevant_titles": ["\"S-Collide\" / SuCo: when to use it (research)"],
+      "difficulty": "hard"
+    },
+    {
+      "query": "How to register a new agent tool in a plugin?",
+      "relevant_docs": ["agent-tools"],
+      "relevant_titles": ["Basic tool", "Plugin agent tools"],
+      "difficulty": "easy"
+    },
+    {
+      "query": "How to make a plugin tool optional and enable it via allowlist?",
+      "relevant_docs": ["agent-tools"],
+      "relevant_titles": ["Optional tool (opt-in)", "Rules + tips"],
+      "difficulty": "medium"
+    },
+    {
+      "query": "How to fix cron.add invalid request errors?",
+      "relevant_docs": ["cron-add-hardening"],
+      "relevant_titles": ["Context", "What changed", "Cron Add Hardening & Schema Alignment"],
+      "difficulty": "medium"
+    },
+    {
+      "query": "What normalization does cron.add perform on payloads?",
+      "relevant_docs": ["cron-add-hardening"],
+      "relevant_titles": ["Current behavior", "What changed"],
+      "difficulty": "hard"
+    },
+    {
+      "query": "How does Telegram allowlist handle prefixes and whitespace?",
+      "relevant_docs": ["group-policy-hardening"],
+      "relevant_titles": ["What changed", "Telegram Allowlist Hardening", "Examples"],
+      "difficulty": "easy"
+    },
+    {
+      "query": "What voice call providers are supported and how to configure them?",
+      "relevant_docs": ["voice-call"],
+      "relevant_titles": ["Config", "Voice Call (plugin)"],
+      "difficulty": "medium"
+    },
+    {
+      "query": "How to expose webhook URL for voice calls using ngrok or Tailscale?",
+      "relevant_docs": ["voice-call"],
+      "relevant_titles": ["Config", "Where it runs (local vs remote)"],
+      "difficulty": "hard"
+    },
+    {
+      "query": "What is the smallest useful pilot for workspace memory?",
+      "relevant_docs": ["memory"],
+      "relevant_titles": ["Smallest useful pilot"],
+      "difficulty": "medium"
+    },
+    {
+      "query": "How does opinion confidence evolution work in memory system?",
+      "relevant_docs": ["memory"],
+      "relevant_titles": ["Reflect: produce stable pages + update beliefs", "Retain / Recall / Reflect (operational loop)"],
+      "difficulty": "hard"
+    },
+    {
+      "query": "What are the Gateway RPC methods for voice calls?",
+      "relevant_docs": ["voice-call"],
+      "relevant_titles": ["Gateway RPC"],
+      "difficulty": "easy"
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "treesearch"
+version = "0.1.0"
+description = "Structure-aware document retrieval without embeddings."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "XuMing", email = "xuming624@qq.com"},
+]
+keywords = ["rag", "retrieval", "tree-search", "best-first", "mcts", "llm", "bm25", "document-indexing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Indexing",
+]
+dependencies = [
+    "openai>=1.0",
+    "tiktoken>=0.5",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+cn = [
+    "jieba>=0.42",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "jieba>=0.42",
+]
+
+[project.urls]
+Homepage = "https://github.com/shibing624/TreeSearch"
+Repository = "https://github.com/shibing624/TreeSearch"
+Issues = "https://github.com/shibing624/TreeSearch/issues"
+
+[project.scripts]
+treesearch = "treesearch.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["treesearch*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
