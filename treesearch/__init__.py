@@ -5,6 +5,7 @@
 
 No vector embeddings. No chunk splitting. Pure LLM reasoning over document trees.
 """
+__version__ = "0.2.3"
 from treesearch.llm import achat, chat, count_tokens, extract_json
 from treesearch.tree import (
     Document,
