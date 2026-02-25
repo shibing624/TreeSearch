@@ -6,7 +6,7 @@ No vector embeddings. No chunk splitting. BM25 + LLM reasoning over document tre
 
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](https://github.com/shibing624/TreeSearch/blob/main/LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/treesearch.svg)](https://pypi.org/project/treesearch/)
+[![PyPI](https://img.shields.io/pypi/v/pytreesearch.svg)](https://pypi.org/project/pytreesearch/)
 
 ## Why TreeSearch?
 
@@ -41,7 +41,7 @@ TreeSearch takes a fundamentally different approach — parse documents into **t
 - **MCTS search** — Monte Carlo Tree Search with LLM as value function
 - **LLM single-pass** — One LLM call per document for minimal cost
 - **Multi-document search** — Route queries across document collections via LLM reasoning
-- **Chinese + English** — jieba tokenization for Chinese, regex for English (jieba is optional)
+- **Chinese + English** — Built-in jieba tokenization for Chinese and regex tokenization for English
 - **Batch indexing** — `build_index()` supports glob patterns for concurrent multi-file processing
 - **Evaluation metrics** — Built-in Precision@K, Recall@K, MRR, NDCG@K, Hit@K, F1@K
 - **Async-first** — All core functions are async with sync wrappers available
@@ -50,12 +50,7 @@ TreeSearch takes a fundamentally different approach — parse documents into **t
 ## Installation
 
 ```bash
-pip install treesearch
-```
-
-With Chinese support:
-```bash
-pip install "treesearch[cn]"
+pip install pytreesearch
 ```
 
 From source:
