@@ -1,58 +1,35 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <defs>
-    <linearGradient id="treeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#2ecc71;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#27ae60;stop-opacity:1" />
-    </linearGradient>
-    <linearGradient id="trunkGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" style="stop-color:#8B5E3C;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#6D4C2A;stop-opacity:1" />
-    </linearGradient>
-    <linearGradient id="lensGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#3498db;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#2980b9;stop-opacity:1" />
-    </linearGradient>
-    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
-      <feDropShadow dx="2" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.15"/>
-    </filter>
-  </defs>
+  <!-- Flat / modern / minimal TreeSearch logo -->
 
-  <!-- Background circle -->
-  <circle cx="256" cy="256" r="240" fill="#f0f9f4" stroke="#27ae60" stroke-width="4" filter="url(#shadow)"/>
+  <!-- Background -->
+  <circle cx="256" cy="256" r="244" fill="#0F172A"/>
 
-  <!-- Tree trunk -->
-  <rect x="218" y="280" width="36" height="100" rx="6" fill="url(#trunkGrad)"/>
+  <!-- Tree canopy (3 flat layers) -->
+  <ellipse cx="236" cy="300" rx="96" ry="44" fill="#2F855A"/>
+  <ellipse cx="236" cy="238" rx="76" ry="38" fill="#38A169"/>
+  <ellipse cx="236" cy="184" rx="56" ry="32" fill="#48BB78"/>
 
-  <!-- Tree canopy - three layers (hierarchy) -->
-  <!-- Bottom layer -->
-  <polygon points="150,290 322,290 236,220" fill="url(#treeGrad)" opacity="0.85"/>
-  <!-- Middle layer -->
-  <polygon points="165,250 307,250 236,185" fill="url(#treeGrad)" opacity="0.9"/>
-  <!-- Top layer -->
-  <polygon points="180,215 292,215 236,155" fill="url(#treeGrad)"/>
+  <!-- Single trunk -->
+  <rect x="224" y="326" width="24" height="62" rx="2" fill="#7C4A2D"/>
 
-  <!-- Tree nodes (dots on the tree representing tree structure) -->
-  <circle cx="236" cy="165" r="8" fill="#fff" opacity="0.9"/>
-  <circle cx="200" cy="210" r="6" fill="#fff" opacity="0.8"/>
-  <circle cx="272" cy="210" r="6" fill="#fff" opacity="0.8"/>
-  <circle cx="180" cy="255" r="5" fill="#fff" opacity="0.7"/>
-  <circle cx="236" cy="245" r="5" fill="#fff" opacity="0.7"/>
-  <circle cx="292" cy="255" r="5" fill="#fff" opacity="0.7"/>
+  <!-- Tree nodes -->
+  <circle cx="236" cy="175" r="9" fill="#F8FAFC"/>
+  <circle cx="198" cy="233" r="8" fill="#F8FAFC"/>
+  <circle cx="274" cy="233" r="8" fill="#F8FAFC"/>
+  <circle cx="166" cy="289" r="7" fill="#F8FAFC"/>
+  <circle cx="236" cy="283" r="7" fill="#F8FAFC"/>
+  <circle cx="306" cy="289" r="7" fill="#F8FAFC"/>
 
-  <!-- Connecting lines (tree edges) -->
-  <line x1="236" y1="173" x2="200" y2="204" stroke="#fff" stroke-width="2" opacity="0.6"/>
-  <line x1="236" y1="173" x2="272" y2="204" stroke="#fff" stroke-width="2" opacity="0.6"/>
-  <line x1="200" y1="216" x2="180" y2="250" stroke="#fff" stroke-width="2" opacity="0.5"/>
-  <line x1="200" y1="216" x2="236" y2="240" stroke="#fff" stroke-width="2" opacity="0.5"/>
-  <line x1="272" y1="216" x2="292" y2="250" stroke="#fff" stroke-width="2" opacity="0.5"/>
+  <!-- Edges -->
+  <line x1="236" y1="184" x2="198" y2="225" stroke="#E2E8F0" stroke-width="3"/>
+  <line x1="236" y1="184" x2="274" y2="225" stroke="#E2E8F0" stroke-width="3"/>
+  <line x1="198" y1="241" x2="166" y2="282" stroke="#E2E8F0" stroke-width="2.5"/>
+  <line x1="198" y1="241" x2="236" y2="276" stroke="#E2E8F0" stroke-width="2.5"/>
+  <line x1="274" y1="241" x2="236" y2="276" stroke="#E2E8F0" stroke-width="2.5"/>
+  <line x1="274" y1="241" x2="306" y2="282" stroke="#E2E8F0" stroke-width="2.5"/>
 
-  <!-- Magnifying glass -->
-  <circle cx="340" cy="340" r="50" fill="none" stroke="url(#lensGrad)" stroke-width="10" filter="url(#shadow)"/>
-  <circle cx="340" cy="340" r="38" fill="#e8f4fd" opacity="0.4"/>
-  <line x1="375" y1="375" x2="420" y2="420" stroke="url(#lensGrad)" stroke-width="14" stroke-linecap="round"/>
-
-  <!-- Small search sparkles -->
-  <circle cx="325" cy="325" r="3" fill="#3498db" opacity="0.6"/>
-  <circle cx="350" cy="320" r="2" fill="#3498db" opacity="0.5"/>
-  <circle cx="330" cy="350" r="2.5" fill="#3498db" opacity="0.5"/>
+  <!-- Magnifier -->
+  <circle cx="342" cy="336" r="54" fill="#1E293B" stroke="#3B82F6" stroke-width="12"/>
+  <circle cx="342" cy="336" r="34" fill="none" stroke="#94A3B8" stroke-width="4" stroke-linecap="round" stroke-dasharray="40 26"/>
+  <line x1="380" y1="374" x2="420" y2="414" stroke="#3B82F6" stroke-width="14" stroke-linecap="round"/>
 </svg>
