@@ -1,12 +1,68 @@
-# TreeSearch
+[**🌐English**](https://github.com/shibing624/TreeSearch/blob/main/README.md) | [**🇨🇳中文**](https://github.com/shibing624/TreeSearch/blob/main/README_ZH.md)
 
-**Structure-aware document retrieval without embeddings.**
+<div align="center">
+  <a href="https://github.com/shibing624/TreeSearch">
+    <img src="https://raw.githubusercontent.com/shibing624/TreeSearch/main/docs/logo.svg" height="150" alt="Logo">
+  </a>
+</div>
 
-No vector embeddings. No chunk splitting. BM25 + LLM reasoning over document tree structures.
+-----------------
 
-[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](https://github.com/shibing624/TreeSearch/blob/main/LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/pytreesearch.svg)](https://pypi.org/project/pytreesearch/)
+# TreeSearch: Structure-Aware Document Retrieval
+[![PyPI version](https://badge.fury.io/py/pytreesearch.svg)](https://badge.fury.io/py/pytreesearch)
+[![Downloads](https://static.pepy.tech/badge/pytreesearch)](https://pepy.tech/project/pytreesearch)
+[![License Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![python_version](https://img.shields.io/badge/Python-3.10%2B-green.svg)](requirements.txt)
+[![GitHub issues](https://img.shields.io/github/issues/shibing624/TreeSearch.svg)](https://github.com/shibing624/TreeSearch/issues)
+[![Wechat Group](https://img.shields.io/badge/wechat-group-green.svg?logo=wechat)](#Community)
+
+**TreeSearch** is a structure-aware document retrieval library. No vector embeddings. No chunk splitting. BM25 + LLM reasoning over document tree structures.
+
+## Installation
+
+```bash
+pip install -U pytreesearch
+```
+
+## Quick Start
+
+```python
+import asyncio
+from treesearch import build_index, load_index, Document, search
+
+async def main():
+    # Build indexes for markdown files
+    await build_index(paths=["docs/*.md"], output_dir="./indexes")
+
+    # Load indexed documents
+    import os
+    documents = []
+    for fp in sorted(os.listdir("./indexes")):
+        if not fp.endswith(".json"):
+            continue
+        data = load_index(os.path.join("./indexes", fp))
+        documents.append(Document(
+            doc_id=fp, doc_name=data["doc_name"],
+            structure=data["structure"],
+            doc_description=data.get("doc_description", ""),
+        ))
+
+    # Search with Best-First strategy (BM25 + LLM)
+    result = await search(query="How does auth work?", documents=documents)
+    for doc_result in result.documents:
+        for node in doc_result["nodes"]:
+            print(f"[{node['score']:.2f}] {node['title']}")
+
+asyncio.run(main())
+```
+
+Set up API key first:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+# Optional: custom endpoint
+export OPENAI_BASE_URL="https://your-endpoint/v1"
+```
 
 ## Why TreeSearch?
 
@@ -47,105 +103,31 @@ TreeSearch takes a fundamentally different approach — parse documents into **t
 - **Async-first** — All core functions are async with sync wrappers available
 - **CLI included** — `treesearch index` and `treesearch search` commands
 
-## Installation
-
-```bash
-pip install pytreesearch
-```
-
-From source:
-
-```bash
-git clone https://github.com/shibing624/TreeSearch.git
-cd TreeSearch
-pip install -e ".[dev]"
-```
-
-## Quick Start
-
-### 1. Set up API key
-
-```bash
-export OPENAI_API_KEY="sk-..."
-# Optional: custom endpoint
-export OPENAI_BASE_URL="https://your-endpoint/v1"
-```
-
-### 2. Build index and search
-
-```python
-import asyncio
-from treesearch import build_index, load_index, Document, search
-
-async def main():
-    # Build indexes for multiple files (supports glob patterns)
-    await build_index(
-        paths=["docs/*.md"],
-        output_dir="./indexes",
-        if_add_doc_description=True,
-    )
-
-    # Load indexed documents
-    import os
-    documents = []
-    for fp in sorted(os.listdir("./indexes")):
-        if not fp.endswith(".json"):
-            continue
-        data = load_index(os.path.join("./indexes", fp))
-        documents.append(Document(
-            doc_id=fp,
-            doc_name=data["doc_name"],
-            structure=data["structure"],
-            doc_description=data.get("doc_description", ""),
-        ))
-
-    # Search with Best-First strategy (default: BM25 + LLM)
-    result = await search(
-        query="How does the authentication system work?",
-        documents=documents,
-    )
-
-    for doc_result in result.documents:
-        for node in doc_result["nodes"]:
-            print(f"[{node['score']:.2f}] {node['title']}")
-            print(f"  {node.get('text', '')[:200]}")
-
-asyncio.run(main())
-```
-
-### 3. BM25 standalone (no LLM needed)
+## BM25 Standalone (No LLM Needed)
 
 ```python
 from treesearch import NodeBM25Index, Document, load_index
 
-# Load documents
 data = load_index("indexes/my_doc.json")
 doc = Document(doc_id="doc1", doc_name=data["doc_name"], structure=data["structure"])
 
-# BM25 node-level search — instant results, no API key needed
 index = NodeBM25Index([doc])
 results = index.search("authentication config", top_k=5)
 for r in results:
     print(f"[{r['bm25_score']:.4f}] {r['title']}")
 ```
 
-### CLI Usage
+## CLI
 
 ```bash
 # Build indexes from glob pattern
 treesearch index --paths "docs/*.md" --add-description
-
-# Build index from specific files
-treesearch index --paths doc1.md doc2.txt -o ./indexes
 
 # Search with Best-First (default, BM25 + LLM)
 treesearch search --index_dir ./indexes/ --query "How does auth work?"
 
 # Search with MCTS strategy
 treesearch search --index_dir ./indexes/ --query "deployment" --strategy mcts
-
-# Search without BM25 pre-scoring
-treesearch search --index_dir ./indexes/ --query "config" --no-bm25
 
 # Control LLM budget
 treesearch search --index_dir ./indexes/ --query "auth" --max-llm-calls 10
@@ -213,6 +195,37 @@ treesearch/
 - [Architecture](https://github.com/shibing624/TreeSearch/blob/main/docs/architecture.md) — Design principles and three-layer architecture
 - [API Reference](https://github.com/shibing624/TreeSearch/blob/main/docs/api.md) — Complete API documentation
 
+## Community
+
+- **GitHub Issues** — [Submit an issue](https://github.com/shibing624/TreeSearch/issues)
+- **WeChat Group** — Add WeChat ID `xuming624`, note "llm", to join the tech group
+
+<img src="https://github.com/shibing624/TreeSearch/blob/main/docs/assets/wechat.jpeg" width="200" />
+
+## Citation
+
+If you use TreeSearch in your research, please cite:
+
+```bibtex
+@software{xu2026treesearch,
+  author = {Xu, Ming},
+  title = {TreeSearch: Structure-Aware Document Retrieval Without Embeddings},
+  year = {2026},
+  publisher = {GitHub},
+  url = {https://github.com/shibing624/TreeSearch}
+}
+```
+
 ## License
 
-Apache License 2.0. See [LICENSE](https://github.com/shibing624/TreeSearch/blob/main/LICENSE) for details.
+[Apache License 2.0](LICENSE)
+
+## Contributing
+
+Contributions are welcome! Please submit a [Pull Request](https://github.com/shibing624/TreeSearch/pulls).
+
+## Acknowledgements
+
+- [BM25 (Okapi BM25)](https://en.wikipedia.org/wiki/Okapi_BM25) — The classic probabilistic ranking function
+- [jieba](https://github.com/fxsjy/jieba) — Chinese text segmentation
+- [OpenAI API](https://platform.openai.com/) — LLM reasoning backbone
