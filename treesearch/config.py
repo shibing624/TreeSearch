@@ -35,26 +35,24 @@ class SearchConfig:
 
 @dataclass
 class RetrieveRerankConfig:
-    """Configuration for three-stage retrieve-rerank pipeline.
+    """Configuration for embedding-first retrieve-rerank pipeline.
 
-    Stage 1: Parallel recall (embedding + BM25)
-    Stage 2: Reciprocal Rank Fusion (RRF) -- rank-based, no normalization needed
-    Stage 3: LLM listwise rerank with tree context (boost mode)
+    Stage 1: Embedding recall (primary backbone) + BM25 recall (supplements)
+    Stage 2: Merge -- embedding order preserved, BM25-only nodes appended
+    Stage 3: LLM rerank on uncertain zone only (blend, not replace)
     """
     # Stage 1: parallel recall
     embedding_topk: int = int(os.getenv("TREESEARCH_RR_EMB_TOPK", "20"))
     bm25_topk: int = int(os.getenv("TREESEARCH_RR_BM25_TOPK", "20"))
 
-    # Stage 2: RRF fusion
-    rrf_k: int = int(os.getenv("TREESEARCH_RR_RRF_K", "60"))
+    # Stage 2: candidate window for LLM rerank
+    rerank_top_n: int = int(os.getenv("TREESEARCH_RR_RERANK_N", "15"))
 
     # Stage 3: LLM rerank
-    rerank_top_n: int = int(os.getenv("TREESEARCH_RR_RERANK_N", "10"))
-    rerank_mode: str = "listwise"
     text_excerpt_len: int = int(os.getenv("TREESEARCH_RR_EXCERPT_LEN", "500"))
     include_ancestors: bool = True
     include_sibling_titles: bool = False
-    llm_weight: float = float(os.getenv("TREESEARCH_RR_LLM_WEIGHT", "0.6"))
+    llm_weight: float = float(os.getenv("TREESEARCH_RR_LLM_WEIGHT", "0.3"))
 
     # Adaptive (used by HybridPreFilter, not by RRF pipeline)
     query_length_threshold: int = 8

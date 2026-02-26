@@ -853,20 +853,19 @@ async def retrieve_rerank(
     config=None,
 ) -> SearchResult:
     """
-    Three-stage retrieve-rerank pipeline combining flat retrieval with LLM reranking.
+    Embedding-first retrieve-rerank pipeline.
 
-    Stage 1: Parallel recall -- Embedding top-K_emb + BM25 top-K_bm25 (0 LLM calls)
-    Stage 2: Reciprocal Rank Fusion (RRF) over union candidate pool (0 LLM calls)
-    Stage 3: LLM listwise rerank with text excerpt + ancestor path (1 LLM call)
+    Stage 1: Embedding recall as primary backbone (ranking preserved exactly)
+    Stage 2: BM25 supplements -- find candidates embedding missed entirely
+    Stage 3: LLM gates BM25 supplements -- only append to tail if highly relevant
 
-    Key design: RRF instead of weighted normalization. Nodes appearing in only one
-    retrieval channel still get valid scores, avoiding the "single-channel penalty"
-    that kills recall when using alpha-weighted normalization.
+    Key principle: embedding's top-k order is SACRED. BM25+LLM can only ADD
+    to the result set (expand recall), never reorder or replace embedding picks.
 
     Args:
         query: search query
         documents: list of Document objects
-        model: LLM model for reranking
+        model: LLM model for supplement gating
         embedding_model: embedding model for Stage 1
         top_k: final number of results
         config: RetrieveRerankConfig (uses global config if None)
@@ -883,121 +882,158 @@ async def retrieve_rerank(
 
     total_llm_calls = 0
 
-    # Stage 1: Parallel recall (Embedding + BM25 independently)
+    # Stage 1: Embedding recall — this is the backbone, order is sacred
     emb_index = EmbeddingPreFilter(documents, model=embedding_model)
-    bm25_index = NodeBM25Index(documents)
-
     emb_results = emb_index.search(query, top_k=config.embedding_topk)
-    bm25_results = bm25_index.search(query, top_k=config.bm25_topk)
-
-    # Build rank lists for RRF
+    emb_scores = {r["node_id"]: r["embedding_score"] for r in emb_results}
     emb_ranked = [r["node_id"] for r in emb_results]
-    bm25_ranked = [r["node_id"] for r in bm25_results]
 
-    # Stage 2: Reciprocal Rank Fusion
-    rrf_results = _reciprocal_rank_fusion(emb_ranked, bm25_ranked, k=60)
-
-    # Take top-N for LLM rerank
-    candidates = rrf_results[:config.rerank_top_n]
-
-    # Build doc_id lookup
+    # Build doc lookup
     doc_lookup = {r["node_id"]: r["doc_id"] for r in emb_results}
+
+    # Stage 2: BM25 supplements
+    bm25_index = NodeBM25Index(documents)
+    bm25_results = bm25_index.search(query, top_k=config.bm25_topk)
     for r in bm25_results:
         doc_lookup.setdefault(r["node_id"], r["doc_id"])
 
-    # Build candidate data for LLM rerank
+    emb_top_set = set(emb_ranked[:top_k])
+    bm25_supplements = [
+        r for r in bm25_results
+        if r["node_id"] not in emb_top_set
+    ][:5]
+
     doc_map = {d.doc_id: d for d in documents}
-    candidate_data = []
-    for nid, fusion_score in candidates:
-        did = doc_lookup.get(nid, "")
-        doc = doc_map.get(did)
-        if not doc:
-            continue
 
-        full_node = doc.get_node_by_id(str(nid))
-        if not full_node:
-            continue
+    # Start with embedding top-k exactly as-is
+    final_nids = list(emb_ranked[:top_k])
 
-        title = full_node.get("title", "")
-        summary = full_node.get("summary", full_node.get("prefix_summary", ""))
-        text = full_node.get("text", "")
-        text_excerpt = text[:config.text_excerpt_len] if text else ""
+    # Stage 3: LLM comparative judgment — compare BM25 supplements vs embedding tail
+    if bm25_supplements:
+        supplement_data = []
+        for r in bm25_supplements:
+            nid = r["node_id"]
+            did = doc_lookup.get(nid, "")
+            doc = doc_map.get(did)
+            if not doc:
+                continue
+            full_node = doc.get_node_by_id(str(nid))
+            if not full_node:
+                continue
 
-        ancestors = _get_ancestor_titles(doc, str(nid)) if config.include_ancestors else []
-        siblings = _get_sibling_titles(doc, str(nid)) if config.include_sibling_titles else []
+            title = full_node.get("title", "")
+            text = full_node.get("text", "")
+            text_excerpt = text[:config.text_excerpt_len] if text else ""
+            ancestors = _get_ancestor_titles(doc, str(nid)) if config.include_ancestors else []
 
-        candidate_data.append({
-            "node_id": nid,
-            "doc_id": did,
-            "title": title,
-            "summary": summary,
-            "text_excerpt": text_excerpt,
-            "ancestors": ancestors,
-            "siblings": siblings,
-            "fusion_score": fusion_score,
-        })
+            supplement_data.append({
+                "node_id": nid,
+                "doc_id": did,
+                "title": title,
+                "text_excerpt": text_excerpt,
+                "ancestors": ancestors,
+            })
 
-    # Stage 3: LLM listwise rerank (boost mode: blend with fusion, not replace)
-    if candidate_data:
-        sections_text = ""
-        for i, c in enumerate(candidate_data):
-            path = " > ".join(c["ancestors"] + [c["title"]]) if c["ancestors"] else c["title"]
-            sections_text += (
-                f"\nCandidate {i + 1} (node_id: {c['node_id']}):\n"
-                f"  Path: {path}\n"
-                f"  Title: {c['title']}\n"
+        # Also include the weakest embedding candidates for comparative judging
+        emb_tail = []
+        for nid in final_nids[max(0, len(final_nids) - 2):]:  # last 2 embedding results
+            did = doc_lookup.get(nid, "")
+            doc = doc_map.get(did)
+            if not doc:
+                continue
+            full_node = doc.get_node_by_id(str(nid))
+            if not full_node:
+                continue
+
+            title = full_node.get("title", "")
+            text = full_node.get("text", "")
+            text_excerpt = text[:config.text_excerpt_len] if text else ""
+            ancestors = _get_ancestor_titles(doc, str(nid)) if config.include_ancestors else []
+
+            emb_tail.append({
+                "node_id": nid,
+                "doc_id": did,
+                "title": title,
+                "text_excerpt": text_excerpt,
+                "ancestors": ancestors,
+                "source": "embedding",
+            })
+
+        if supplement_data and emb_tail:
+            # Build combined candidate list for LLM to compare
+            all_candidates = []
+            for c in emb_tail:
+                c["source"] = "current"
+                all_candidates.append(c)
+            for c in supplement_data:
+                c["source"] = "candidate"
+                all_candidates.append(c)
+
+            sections_text = ""
+            for i, c in enumerate(all_candidates):
+                path = " > ".join(c["ancestors"] + [c["title"]]) if c["ancestors"] else c["title"]
+                sections_text += (
+                    f"\nSection {i + 1} (node_id: {c['node_id']}):\n"
+                    f"  Path: {path}\n"
+                    f"  Title: {c['title']}\n"
+                )
+                if c["text_excerpt"]:
+                    sections_text += f"  Content: {c['text_excerpt'][:300]}\n"
+
+            prompt = (
+                f"Rate each document section's relevance to the query on a scale of 0.0 to 1.0. "
+                f"Be precise: 0.9+ means the section directly answers the query, "
+                f"0.5-0.8 means partially relevant, below 0.5 means not relevant.\n\n"
+                f"Query: {query}\n"
+                f"{sections_text}\n"
+                f"Return JSON only:\n"
+                f'{{"rankings": [{{"node_id": "...", "relevance": 0.0}}]}}'
             )
-            if c["text_excerpt"]:
-                sections_text += f"  Content: {c['text_excerpt']}\n"
-            if c["siblings"]:
-                sections_text += f"  Sibling sections: {', '.join(c['siblings'])}\n"
 
-        prompt = (
-            f"Rank these document sections by relevance to the query. "
-            f"Return a JSON array of objects with node_id and relevance score (0.0-1.0).\n\n"
-            f"Query: {query}\n"
-            f"{sections_text}\n"
-            f"Return JSON only:\n"
-            f'{{"rankings": [{{"node_id": "...", "relevance": 0.0}}]}}'
-        )
+            response = await achat(prompt, model=model, temperature=0)
+            result = extract_json(response)
+            total_llm_calls += 1
 
-        response = await achat(prompt, model=model, temperature=0)
-        result = extract_json(response)
-        total_llm_calls += 1
+            rankings = result.get("rankings", [])
+            llm_scores = {}
+            for item in rankings:
+                rid = str(item.get("node_id", ""))
+                rel = float(item.get("relevance", 0.0))
+                llm_scores[rid] = rel
 
-        rankings = result.get("rankings", [])
-        rerank_scores = {}
-        for item in rankings:
-            rid = str(item.get("node_id", ""))
-            rel = float(item.get("relevance", 0.0))
-            rerank_scores[rid] = rel
+            # Compare: if any supplement scores higher than the weakest embedding tail,
+            # swap them (from the tail, preserving top embedding positions)
+            emb_tail_nids = [c["node_id"] for c in emb_tail]
+            emb_tail_scores = [(nid, llm_scores.get(nid, 0.0)) for nid in emb_tail_nids]
+            emb_tail_scores.sort(key=lambda x: x[1])  # weakest first
 
-        # Normalize fusion scores to [0, 1] for blending
-        fusion_vals = [c["fusion_score"] for c in candidate_data]
-        f_lo, f_hi = min(fusion_vals), max(fusion_vals)
-        f_rng = f_hi - f_lo if f_hi > f_lo else 1.0
+            supplement_scores = [
+                (c["node_id"], llm_scores.get(c["node_id"], 0.0))
+                for c in supplement_data
+                if c["node_id"] not in set(final_nids)
+            ]
+            supplement_scores.sort(key=lambda x: -x[1])  # strongest first
 
-        # Blend: 60% LLM rerank + 40% RRF fusion (LLM boosts, not replaces)
-        llm_weight = 0.6
-        final_scored = []
-        for c in candidate_data:
-            nid = c["node_id"]
-            fusion_norm = (c["fusion_score"] - f_lo) / f_rng if f_rng > 0 else 0.5
-            if nid in rerank_scores:
-                blended = llm_weight * rerank_scores[nid] + (1 - llm_weight) * fusion_norm
-                final_scored.append((nid, c["doc_id"], blended))
-            else:
-                final_scored.append((nid, c["doc_id"], (1 - llm_weight) * fusion_norm))
+            # Swap: replace ONLY the weakest embedding tail with the strongest supplement
+            # Limit to at most 1 swap to minimize risk of losing good embedding results
+            swapped = False
+            for sup_nid, sup_score in supplement_scores:
+                if swapped or not emb_tail_scores:
+                    break
+                weakest_nid, weakest_score = emb_tail_scores[0]
+                # Only swap if supplement is clearly better (margin > 0.15)
+                if sup_score > weakest_score + 0.15 and sup_score >= 0.6:
+                    try:
+                        idx = final_nids.index(weakest_nid)
+                        final_nids[idx] = sup_nid
+                        swapped = True
+                    except ValueError:
+                        pass
 
-        final_scored.sort(key=lambda x: -x[2])
-    else:
-        final_scored = [(nid, doc_lookup.get(nid, ""), s) for nid, s in rrf_results[:top_k]]
-
-    # Build output (group by doc)
-    final_scored = final_scored[:top_k]
-
+    # Build output (group by doc), take top_k from the expanded list
     doc_results: dict[str, dict] = {}
-    for nid, did, score in final_scored:
+    for nid in final_nids[:top_k]:
+        did = doc_lookup.get(nid, "")
         if did not in doc_results:
             doc = doc_map.get(did)
             doc_results[did] = {
@@ -1005,6 +1041,7 @@ async def retrieve_rerank(
                 "doc_name": doc.doc_name if doc else "",
                 "nodes": [],
             }
+        score = emb_scores.get(nid, 0.5)
         node_entry = {"node_id": nid, "title": "", "score": round(score, 4)}
         doc = doc_map.get(did)
         if doc:
