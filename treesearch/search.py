@@ -780,24 +780,59 @@ async def search(
 # Three-stage Retrieve-Rerank Pipeline
 # ---------------------------------------------------------------------------
 
+def _get_sibling_titles(doc: Document, node_id: str) -> list[str]:
+    """Get sibling node titles for context."""
+    parent_map = {}
+
+    def _scan(structure, parent_id=None):
+        if isinstance(structure, list):
+            for item in structure:
+                _scan(item, parent_id)
+        elif isinstance(structure, dict):
+            nid = structure.get("node_id", "")
+            parent_map[nid] = parent_id
+            for child in structure.get("nodes", []):
+                _scan(child, nid)
+
+    _scan(doc.structure)
+    pid = parent_map.get(node_id)
+    if not pid:
+        return []
+
+    parent_node = doc.get_node_by_id(pid)
+    if not parent_node:
+        return []
+
+    siblings = []
+    for child in parent_node.get("nodes", []):
+        cid = child.get("node_id", "")
+        if cid != node_id:
+            siblings.append(child.get("title", ""))
+    return siblings
+
+
+def _adaptive_bm25_weight(query: str, config) -> float:
+    """Compute adaptive BM25 weight based on query length."""
+    word_count = len(query.strip().split())
+    if word_count <= config.query_length_threshold:
+        return config.short_query_bm25_weight
+    return config.long_query_bm25_weight
+
+
 async def retrieve_rerank(
     query: str,
     documents: list[Document],
     model: str = DEFAULT_MODEL,
     embedding_model: str = "text-embedding-3-small",
     top_k: int = 5,
-    recall_k: int = 20,
-    rerank_n: int = 8,
-    bm25_weight: float = 0.5,
-    include_ancestors: bool = True,
-    text_excerpt_len: int = 500,
+    config=None,
 ) -> SearchResult:
     """
     Three-stage retrieve-rerank pipeline combining flat retrieval with LLM reranking.
 
-    Stage 1: Embedding recall (top recall_k candidates, 0 LLM calls)
-    Stage 2: BM25 score fusion + candidate-pool normalization (0 LLM calls)
-    Stage 3: LLM listwise rerank with tree context (1-2 LLM calls)
+    Stage 1: Parallel recall — Embedding top-K_emb + BM25 top-K_bm25 (0 LLM calls)
+    Stage 2: Union candidate pool + score fusion + candidate-pool normalization (0 LLM calls)
+    Stage 3: LLM listwise rerank with text excerpt + ancestor path (1 LLM call)
 
     Args:
         query: search query
@@ -805,34 +840,33 @@ async def retrieve_rerank(
         model: LLM model for reranking
         embedding_model: embedding model for Stage 1
         top_k: final number of results
-        recall_k: Stage 1 candidate pool size
-        rerank_n: Stage 3 candidates to send to LLM
-        bm25_weight: weight for BM25 in score fusion (alpha)
-        include_ancestors: include ancestor path in LLM rerank context
-        text_excerpt_len: max chars of text excerpt for LLM rerank
+        config: RetrieveRerankConfig (uses global config if None)
 
     Returns:
         SearchResult
     """
+    from .config import get_config, RetrieveRerankConfig
     from .embeddings import EmbeddingPreFilter
     from .rank_bm25 import NodeBM25Index
 
+    if config is None:
+        config = get_config().retrieve_rerank
+
     total_llm_calls = 0
 
-    # Stage 1: Embedding recall
+    # Stage 1: Parallel recall (Embedding + BM25 independently)
     emb_index = EmbeddingPreFilter(documents, model=embedding_model)
-    emb_results = emb_index.search(query, top_k=recall_k)
-    emb_scores = {r["node_id"]: r["embedding_score"] for r in emb_results}
-
-    # Stage 2: BM25 score fusion
     bm25_index = NodeBM25Index(documents)
-    bm25_results = bm25_index.search(query, top_k=recall_k)
+
+    emb_results = emb_index.search(query, top_k=config.embedding_topk)
+    bm25_results = bm25_index.search(query, top_k=config.bm25_topk)
+
+    emb_scores = {r["node_id"]: r["embedding_score"] for r in emb_results}
     bm25_scores = {r["node_id"]: r["bm25_score"] for r in bm25_results}
 
-    # Merge candidate pool
+    # Stage 2: Union candidate pool + score fusion
     all_nids = set(emb_scores.keys()) | set(bm25_scores.keys())
 
-    # Candidate-pool normalization
     def _norm(scores: dict[str, float]) -> dict[str, float]:
         if not scores:
             return {}
@@ -846,21 +880,24 @@ async def retrieve_rerank(
     emb_norm = _norm(emb_scores)
     bm25_norm = _norm(bm25_scores)
 
-    alpha = bm25_weight
+    # Adaptive alpha based on query length
+    alpha = _adaptive_bm25_weight(query, config)
+
     fused = []
     for nid in all_nids:
         score = alpha * bm25_norm.get(nid, 0.0) + (1 - alpha) * emb_norm.get(nid, 0.0)
         fused.append((nid, score))
 
     fused.sort(key=lambda x: -x[1])
-    candidates = fused[:rerank_n]
+    # Soft sort, take top-N for LLM rerank (no hard pruning before this)
+    candidates = fused[:config.rerank_top_n]
 
-    # Build doc_id lookup from emb_results + bm25_results
+    # Build doc_id lookup
     doc_lookup = {r["node_id"]: r["doc_id"] for r in emb_results}
     for r in bm25_results:
         doc_lookup.setdefault(r["node_id"], r["doc_id"])
 
-    # Build node data for LLM rerank
+    # Build candidate data for LLM rerank
     doc_map = {d.doc_id: d for d in documents}
     candidate_data = []
     for nid, fusion_score in candidates:
@@ -876,11 +913,10 @@ async def retrieve_rerank(
         title = full_node.get("title", "")
         summary = full_node.get("summary", full_node.get("prefix_summary", ""))
         text = full_node.get("text", "")
-        text_excerpt = text[:text_excerpt_len] if text else ""
+        text_excerpt = text[:config.text_excerpt_len] if text else ""
 
-        ancestors = []
-        if include_ancestors:
-            ancestors = _get_ancestor_titles(doc, str(nid))
+        ancestors = _get_ancestor_titles(doc, str(nid)) if config.include_ancestors else []
+        siblings = _get_sibling_titles(doc, str(nid)) if config.include_sibling_titles else []
 
         candidate_data.append({
             "node_id": nid,
@@ -889,6 +925,7 @@ async def retrieve_rerank(
             "summary": summary,
             "text_excerpt": text_excerpt,
             "ancestors": ancestors,
+            "siblings": siblings,
             "fusion_score": fusion_score,
         })
 
@@ -904,6 +941,8 @@ async def retrieve_rerank(
             )
             if c["text_excerpt"]:
                 sections_text += f"  Content: {c['text_excerpt']}\n"
+            if c["siblings"]:
+                sections_text += f"  Sibling sections: {', '.join(c['siblings'])}\n"
 
         prompt = (
             f"Rank these document sections by relevance to the query. "
@@ -925,13 +964,13 @@ async def retrieve_rerank(
             rel = float(item.get("relevance", 0.0))
             rerank_scores[rid] = rel
 
-        # Merge: use LLM rerank score where available, fallback to fusion score
         final_scored = []
         for c in candidate_data:
             nid = c["node_id"]
             if nid in rerank_scores:
                 final_scored.append((nid, c["doc_id"], rerank_scores[nid]))
             else:
+                # Fallback: discount fusion score for nodes LLM didn't rank
                 final_scored.append((nid, c["doc_id"], c["fusion_score"] * 0.5))
 
         final_scored.sort(key=lambda x: -x[2])

@@ -407,6 +407,7 @@ async def _evaluate_sample(
                 model=model,
                 embedding_model=embedding_model,
                 top_k=top_k,
+                config=None,  # uses global RetrieveRerankConfig from env
             )
             for doc_result in result.documents:
                 for node in doc_result.get("nodes", []):

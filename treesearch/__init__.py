@@ -26,7 +26,7 @@ from treesearch.query_decompose import decompose_and_search, analyze_query
 from treesearch.chunk import refine_search, RefinedSearchResult, Chunk
 
 # Configuration
-from treesearch.config import TreeSearchConfig, get_config, set_config, reset_config
+from treesearch.config import TreeSearchConfig, RetrieveRerankConfig, get_config, set_config, reset_config
 
 # Advanced: search strategies, BM25 (for power users)
 from treesearch.search import (
