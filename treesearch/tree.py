@@ -4,6 +4,7 @@
 @description: Tree structure data models and operations.
 """
 import copy
+import glob as globmod
 import json
 import logging
 import os
@@ -156,6 +157,9 @@ def format_structure(structure, order: list[str] = None):
 
 INDEX_VERSION = "1.0"
 
+# Global document cache: path -> Document
+_doc_cache: dict[str, Document] = {}
+
 
 def save_index(index: dict, path: str) -> None:
     """Save tree structure index to a JSON file with version metadata."""
@@ -163,18 +167,55 @@ def save_index(index: dict, path: str) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(index, f, indent=2, ensure_ascii=False)
-    logger.info(f"Index saved to: {path}")
+    logger.info("Index saved to: %s", path)
 
 
-def load_index(path: str) -> dict:
-    """Load tree structure index from a JSON file. Warns on version mismatch."""
-    with open(path, "r", encoding="utf-8") as f:
+def load_index(path: str) -> Document:
+    """Load a single index JSON file and return a Document object.
+
+    Results are cached: loading the same path again returns the cached Document.
+    """
+    abs_path = os.path.abspath(path)
+    if abs_path in _doc_cache:
+        return _doc_cache[abs_path]
+
+    with open(abs_path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
     file_version = data.get("index_version", "unknown")
     if file_version != INDEX_VERSION:
         logger.warning("Index version mismatch: file=%s, expected=%s, path=%s",
-                       file_version, INDEX_VERSION, path)
-    return data
+                       file_version, INDEX_VERSION, abs_path)
+
+    basename = os.path.basename(abs_path)
+    doc_id = os.path.splitext(basename)[0].replace("_structure", "")
+    doc = Document(
+        doc_id=doc_id,
+        doc_name=data.get("doc_name", doc_id),
+        structure=data.get("structure", []),
+        doc_description=data.get("doc_description", ""),
+        metadata={"source_path": data.get("source_path", "")},
+    )
+    _doc_cache[abs_path] = doc
+    return doc
+
+
+def load_documents(index_dir: str) -> list[Document]:
+    """Load all index JSON files from a directory and return a list of Documents.
+
+    Skips meta files (starting with '_'). Uses cache internally.
+    """
+    pattern = os.path.join(index_dir, "*.json")
+    files = sorted(
+        f for f in globmod.glob(pattern)
+        if not os.path.basename(f).startswith("_")
+    )
+    return [load_index(f) for f in files]
+
+
+def clear_doc_cache() -> None:
+    """Clear the global document cache."""
+    _doc_cache.clear()
 
 
 # ---------------------------------------------------------------------------

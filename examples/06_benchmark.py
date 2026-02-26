@@ -38,7 +38,7 @@ from treesearch import (
     Document,
     NodeBM25Index,
     build_index,
-    load_index,
+    load_documents,
     search,
     evaluate_query,
     flatten_tree,
@@ -80,21 +80,9 @@ async def ensure_indexes(force: bool = False) -> None:
     print(f"Indexes built in {INDEX_DIR}/")
 
 
-def load_documents() -> list[Document]:
+def load_bench_documents() -> list[Document]:
     """Load all indexed documents."""
-    documents = []
-    for fp in sorted(os.listdir(INDEX_DIR)):
-        if not fp.endswith(".json") or fp.startswith("_"):
-            continue
-        data = load_index(os.path.join(INDEX_DIR, fp))
-        doc = Document(
-            doc_id=os.path.splitext(fp)[0].replace("_structure", ""),
-            doc_name=data["doc_name"],
-            structure=data["structure"],
-            doc_description=data.get("doc_description", ""),
-        )
-        documents.append(doc)
-    return documents
+    return load_documents(INDEX_DIR)
 
 
 def resolve_ground_truth_node_ids(documents: list[Document], gt_queries: list[dict]) -> list[dict]:
@@ -374,7 +362,7 @@ async def main():
         print(f"Using existing indexes in {INDEX_DIR}/")
 
     # Load documents and ground truth
-    documents = load_documents()
+    documents = load_bench_documents()
     print(f"Loaded {len(documents)} documents:")
     for doc in documents:
         node_count = len(flatten_tree(doc.structure))

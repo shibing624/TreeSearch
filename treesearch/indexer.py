@@ -16,7 +16,7 @@ from typing import Optional
 
 from .llm import achat, achat_with_finish_reason, count_tokens, extract_json, DEFAULT_MODEL
 from .tree import (
-    assign_node_ids, flatten_tree, format_structure, remove_fields, save_index,
+    Document, assign_node_ids, flatten_tree, format_structure, remove_fields, save_index, load_index,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,6 +134,8 @@ def _cut_md_text(markers: list[dict], lines: list[str]) -> list[dict]:
         nodes.append({
             "title": mk["title"],
             "line_num": mk["line_num"],
+            "line_start": mk["line_num"],
+            "line_end": end,
             "level": mk["level"],
             "text": "\n".join(lines[start:end]).strip(),
         })
@@ -177,7 +179,7 @@ def _thin_tree(node_list: list[dict], min_tokens: int, model: str = DEFAULT_MODE
     return node_list
 
 
-def _build_tree(node_list: list[dict], include_line_range: bool = False) -> list[dict]:
+def _build_tree(node_list: list[dict]) -> list[dict]:
     """Build hierarchical tree from flat node list using a stack algorithm."""
     if not node_list:
         return []
@@ -191,13 +193,10 @@ def _build_tree(node_list: list[dict], include_line_range: bool = False) -> list
             "title": node["title"],
             "node_id": str(counter).zfill(4),
             "text": node.get("text", ""),
+            "line_start": node.get("line_start", node.get("line_num")),
+            "line_end": node.get("line_end"),
             "nodes": [],
         }
-        if include_line_range:
-            tree_node["line_start"] = node.get("line_start", node.get("line_num"))
-            tree_node["line_end"] = node.get("line_end")
-        else:
-            tree_node["line_num"] = node.get("line_num")
         counter += 1
 
         while stack and stack[-1][1] >= level:
@@ -257,10 +256,10 @@ async def md_to_tree(
     if if_add_node_id:
         assign_node_ids(tree)
 
-    # Field ordering
+    # Field ordering (unified: line_start/line_end for both MD and text)
     base_order = ["title", "node_id", "summary", "prefix_summary"]
     text_fields = ["text"] if if_add_node_text or if_add_node_summary else []
-    tail_fields = ["line_num", "nodes"]
+    tail_fields = ["line_start", "line_end", "nodes"]
     order = base_order + text_fields + tail_fields
 
     tree = format_structure(tree, order=order)
@@ -273,6 +272,8 @@ async def md_to_tree(
             tree = format_structure(tree, order=order_no_text)
 
     result = {"doc_name": doc_name, "structure": tree}
+    if md_path:
+        result["source_path"] = os.path.abspath(md_path)
 
     if if_add_doc_description:
         logger.info("Generating document description...")
@@ -599,7 +600,7 @@ async def text_to_tree(
 
     # Step 4: build tree
     logger.info("Building tree from %d nodes...", len(nodes))
-    tree = _build_tree(nodes, include_line_range=True)
+    tree = _build_tree(nodes)
 
     if if_add_node_id:
         assign_node_ids(tree)
@@ -620,6 +621,8 @@ async def text_to_tree(
             tree = format_structure(tree, order=order_no_text)
 
     result = {"doc_name": doc_name, "structure": tree}
+    if text_path:
+        result["source_path"] = os.path.abspath(text_path)
 
     if if_add_doc_description:
         logger.info("Generating document description...")
@@ -671,9 +674,9 @@ async def build_index(
     max_concurrency: int = 5,
     force: bool = False,
     **kwargs,
-) -> list[dict]:
+) -> list[Document]:
     """
-    Build tree indexes for multiple files with incremental support and concurrency control.
+    Build tree indexes for multiple files. Returns list of Document objects ready for search.
 
     Args:
         paths: list of file paths or glob patterns (e.g. ["docs/*.md", "paper.txt"])
@@ -683,7 +686,7 @@ async def build_index(
         **kwargs: passed through to md_to_tree / text_to_tree
 
     Returns:
-        list of result dicts (same format as md_to_tree / text_to_tree)
+        list of Document objects (directly usable with search())
     """
     # Expand globs
     expanded = []
@@ -745,20 +748,20 @@ async def build_index(
 
     results = await asyncio.gather(*(_index_one(fp) for fp in to_index))
 
-    # Load cached results for skipped files
-    all_results = []
+    # Collect all Document objects (load from saved files for cache consistency)
+    documents = []
+    result_iter = iter(results)
     for fp in expanded:
-        if fp in skipped:
-            name = os.path.splitext(os.path.basename(fp))[0]
-            out_path = os.path.join(output_dir, f"{name}_structure.json")
-            with open(out_path, "r", encoding="utf-8") as f:
-                all_results.append(json.load(f))
-        else:
-            all_results.append(results.pop(0))
+        name = os.path.splitext(os.path.basename(fp))[0]
+        out_path = os.path.join(output_dir, f"{name}_structure.json")
+        if fp not in skipped:
+            next(result_iter)  # consume the result (already saved to disk)
+        doc = load_index(out_path)
+        documents.append(doc)
 
     # Update metadata
     for fp in expanded:
         meta[fp] = file_hashes[fp]
     _save_index_meta(output_dir, meta)
 
-    return all_results
+    return documents

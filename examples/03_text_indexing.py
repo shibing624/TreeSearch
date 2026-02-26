@@ -9,7 +9,7 @@ Demonstrates TreeSearch's ability to parse unstructured text into a tree:
   - No special formatting required -- works with any plain text
 
 Usage:
-    python examples/02_text_indexing.py
+    python examples/03_text_indexing.py
 """
 import asyncio
 import os

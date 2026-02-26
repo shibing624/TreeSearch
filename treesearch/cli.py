@@ -15,7 +15,6 @@ Usage:
 """
 import argparse
 import asyncio
-import glob
 import json
 import logging
 import os
@@ -23,7 +22,7 @@ import sys
 import time
 
 from treesearch.indexer import build_index, md_to_tree, text_to_tree
-from treesearch.tree import Document, save_index, load_index, print_toc
+from treesearch.tree import Document, save_index, load_documents, print_toc
 from treesearch.search import search
 
 logger = logging.getLogger(__name__)
@@ -120,27 +119,14 @@ def _add_search_args(sub: argparse.ArgumentParser) -> None:
                      help="Disable BM25 pre-scoring for best_first strategy")
 
 
-def _load_documents(index_dir: str) -> list[Document]:
+def _load_documents_from_dir(index_dir: str) -> list[Document]:
     """Load all index JSON files from a directory into Document objects."""
-    pattern = os.path.join(index_dir, "*.json")
-    files = sorted(f for f in glob.glob(pattern) if not os.path.basename(f).startswith("_"))
-    if not files:
+    documents = load_documents(index_dir)
+    if not documents:
         print(f"No JSON index files found in: {index_dir}", file=sys.stderr)
         sys.exit(1)
-
-    documents = []
-    for fp in files:
-        data = load_index(fp)
-        doc_name = data.get("doc_name", os.path.splitext(os.path.basename(fp))[0])
-        doc = Document(
-            doc_id=os.path.basename(fp),
-            doc_name=doc_name,
-            structure=data.get("structure", []),
-            doc_description=data.get("doc_description", ""),
-        )
-        documents.append(doc)
+    for doc in documents:
         logger.info("Loaded document: %s (%d root nodes)", doc.doc_name, len(doc.structure))
-
     return documents
 
 
@@ -149,7 +135,7 @@ async def _run_search(args) -> None:
     if args.api_key:
         os.environ["OPENAI_API_KEY"] = args.api_key
 
-    documents = _load_documents(args.index_dir)
+    documents = _load_documents_from_dir(args.index_dir)
     print(f"Loaded {len(documents)} document(s) from {args.index_dir}")
     for doc in documents:
         print(f"  - {doc.doc_name}")

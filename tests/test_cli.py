@@ -10,7 +10,7 @@ import tempfile
 from unittest.mock import patch, AsyncMock
 
 import pytest
-from treesearch.cli import _build_parser, _load_documents
+from treesearch.cli import _build_parser, _load_documents_from_dir
 
 
 class TestBuildParser:
@@ -87,6 +87,8 @@ class TestBuildParser:
 
 class TestLoadDocuments:
     def test_loads_json_files(self):
+        from treesearch.tree import clear_doc_cache
+        clear_doc_cache()
         with tempfile.TemporaryDirectory() as tmpdir:
             for name in ["doc_a", "doc_b"]:
                 data = {
@@ -97,14 +99,17 @@ class TestLoadDocuments:
                 with open(os.path.join(tmpdir, f"{name}.json"), "w") as f:
                     json.dump(data, f)
 
-            docs = _load_documents(tmpdir)
+            docs = _load_documents_from_dir(tmpdir)
             assert len(docs) == 2
             assert docs[0].doc_name == "doc_a"
             assert docs[1].doc_name == "doc_b"
             assert docs[0].doc_description == "Description of doc_a"
+        clear_doc_cache()
 
     def test_skips_meta_files(self):
         """_index_meta.json should be excluded from document loading."""
+        from treesearch.tree import clear_doc_cache
+        clear_doc_cache()
         with tempfile.TemporaryDirectory() as tmpdir:
             # Normal doc
             data = {
@@ -117,11 +122,12 @@ class TestLoadDocuments:
             with open(os.path.join(tmpdir, "_index_meta.json"), "w") as f:
                 json.dump({"some_file": "abc123"}, f)
 
-            docs = _load_documents(tmpdir)
+            docs = _load_documents_from_dir(tmpdir)
             assert len(docs) == 1
             assert docs[0].doc_name == "doc_a"
+        clear_doc_cache()
 
     def test_empty_directory_exits(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with pytest.raises(SystemExit):
-                _load_documents(tmpdir)
+                _load_documents_from_dir(tmpdir)

@@ -662,11 +662,14 @@ async def search(
 
         total_llm_calls += doc_llm_calls
 
-        # Attach text to results
+        # Attach full node fields to results
         for n in nodes:
             full = doc.get_node_by_id(str(n["node_id"]))
             if full:
                 n["text"] = full.get("text", "")
+                n["summary"] = full.get("summary", full.get("prefix_summary", ""))
+                n["line_start"] = full.get("line_start")
+                n["line_end"] = full.get("line_end")
 
         return {"doc_id": doc.doc_id, "doc_name": doc.doc_name, "nodes": nodes}
 

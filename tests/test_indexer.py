@@ -148,11 +148,16 @@ class TestMdToTree:
 
         assert "doc_name" in result
         assert "structure" in result
+        assert "source_path" in result
+        assert os.path.isabs(result["source_path"])
         assert len(result["structure"]) > 0
 
         from treesearch.tree import flatten_tree
         nodes = flatten_tree(result["structure"])
         assert all("node_id" in n for n in nodes)
+        # Verify line_start/line_end fields exist
+        assert all("line_start" in n for n in nodes)
+        assert all("line_end" in n for n in nodes)
 
     @pytest.mark.asyncio
     async def test_no_summary(self, sample_md_file):
@@ -214,6 +219,8 @@ class TestTextToTree:
 
         assert "doc_name" in result
         assert "structure" in result
+        assert "source_path" in result
+        assert os.path.isabs(result["source_path"])
         assert len(result["structure"]) > 0
 
     @pytest.mark.asyncio

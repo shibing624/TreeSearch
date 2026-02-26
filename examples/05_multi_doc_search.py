@@ -11,7 +11,7 @@ Demonstrates the three-layer search architecture:
 Compares: best_first (default) vs mcts vs llm strategies.
 
 Usage:
-    python examples/04_multi_doc_search.py
+    python examples/05_multi_doc_search.py
 """
 import asyncio
 import os
@@ -22,9 +22,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from treesearch import (
     Document,
     NodeBM25Index,
-    BestFirstTreeSearch,
+    TreeSearch,
     build_index,
-    load_index,
+    load_documents,
     search,
     tokenize,
 )
@@ -51,21 +51,9 @@ async def ensure_indexes() -> None:
     print(f"Indexed {len(results)} file(s) to {INDEX_DIR}/\n")
 
 
-def load_documents() -> list[Document]:
+def load_docs() -> list[Document]:
     """Load all indexed documents."""
-    documents = []
-    for fp in sorted(os.listdir(INDEX_DIR)):
-        if not fp.endswith(".json") or fp.startswith("_"):
-            continue
-        data = load_index(os.path.join(INDEX_DIR, fp))
-        doc = Document(
-            doc_id=os.path.splitext(fp)[0].replace("_structure", ""),
-            doc_name=data["doc_name"],
-            structure=data["structure"],
-            doc_description=data.get("doc_description", ""),
-        )
-        documents.append(doc)
-    return documents
+    return load_documents(INDEX_DIR)
 
 
 async def demo_bm25_standalone(documents: list[Document]):
@@ -120,11 +108,16 @@ async def demo_best_first_search(documents: list[Document]):
             print(f"  [{doc_result['doc_name']}]")
             for node in doc_result["nodes"]:
                 score = node.get("score", 0)
-                print(f"    [{score:.2f}] {node['title']}")
-                text = node.get("text", "")
+                nid = node.get("node_id", "")
+                ls = node.get("line_start", "")
+                le = node.get("line_end", "")
+                summary = node.get("summary", "")[:80]
+                text = node.get("text", "").replace("\n", " ")[:120]
+                print(f"    [{score:.2f}] [{nid}] {node['title']}  L{ls}-{le}")
+                if summary:
+                    print(f"             summary: {summary}...")
                 if text:
-                    preview = text[:120].replace("\n", " ")
-                    print(f"           {preview}...")
+                    print(f"             text: {text}...")
 
 
 async def demo_strategy_comparison(documents: list[Document]):
@@ -150,7 +143,10 @@ async def demo_strategy_comparison(documents: list[Document]):
         for doc_result in result.documents:
             for node in doc_result["nodes"][:3]:
                 score = node.get("score", 0)
-                print(f"  [{score:.2f}] {node['title']}")
+                nid = node.get("node_id", "")
+                ls = node.get("line_start", "")
+                le = node.get("line_end", "")
+                print(f"  [{score:.2f}] [{nid}] {node['title']}  L{ls}-{le}")
         print()
 
 
@@ -175,7 +171,7 @@ async def demo_chinese_query(documents: list[Document]):
 async def main():
     await ensure_indexes()
 
-    documents = load_documents()
+    documents = load_docs()
     print(f"Loaded {len(documents)} documents:")
     for doc in documents:
         desc = doc.doc_description[:60] if doc.doc_description else "N/A"

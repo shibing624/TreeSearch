@@ -18,6 +18,8 @@ from treesearch.tree import (
     format_structure,
     save_index,
     load_index,
+    load_documents,
+    clear_doc_cache,
     print_toc,
 )
 
@@ -107,16 +109,50 @@ class TestFormatStructure:
 
 class TestSaveLoadIndex:
     def test_round_trip(self, sample_tree_structure):
-        index = {"doc_name": "test", "structure": sample_tree_structure}
+        clear_doc_cache()
+        index = {"doc_name": "test", "structure": sample_tree_structure, "source_path": "/tmp/test.md"}
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
             path = f.name
         try:
             save_index(index, path)
-            loaded = load_index(path)
-            assert loaded["doc_name"] == "test"
-            assert len(loaded["structure"]) == 2
+            doc = load_index(path)
+            assert isinstance(doc, Document)
+            assert doc.doc_name == "test"
+            assert len(doc.structure) == 2
+            assert doc.metadata.get("source_path") == "/tmp/test.md"
         finally:
+            clear_doc_cache()
             os.unlink(path)
+
+    def test_cache_returns_same_object(self, sample_tree_structure):
+        clear_doc_cache()
+        index = {"doc_name": "cached", "structure": sample_tree_structure}
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        try:
+            save_index(index, path)
+            doc1 = load_index(path)
+            doc2 = load_index(path)
+            assert doc1 is doc2
+        finally:
+            clear_doc_cache()
+            os.unlink(path)
+
+    def test_load_documents_from_dir(self, sample_tree_structure):
+        clear_doc_cache()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in ["alpha", "beta"]:
+                index = {"doc_name": name, "structure": sample_tree_structure}
+                save_index(index, os.path.join(tmpdir, f"{name}_structure.json"))
+            # Add a meta file that should be skipped
+            with open(os.path.join(tmpdir, "_index_meta.json"), "w") as f:
+                json.dump({"meta": True}, f)
+
+            docs = load_documents(tmpdir)
+            assert len(docs) == 2
+            assert docs[0].doc_name == "alpha"
+            assert docs[1].doc_name == "beta"
+        clear_doc_cache()
 
     def test_creates_directory(self, sample_tree_structure):
         with tempfile.TemporaryDirectory() as tmpdir:
