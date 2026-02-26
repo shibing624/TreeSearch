@@ -33,7 +33,7 @@ jobs:
       - name: Install from PyPI
         run: |
           pip install -U pytreesearch
-          python -c "import pytreesearch; print(pytreesearch.__version__)"
+          python -c "import treesearch; print(treesearch.__version__)"
           pip uninstall -y pytreesearch
 
       - name: Install dependencies
