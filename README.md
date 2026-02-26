@@ -61,7 +61,7 @@ Set up API key first:
 ```bash
 export OPENAI_API_KEY="sk-..."
 # Optional: custom endpoint
-export OPENAI_BASE_URL="https://your-endpoint/v1"
+export OPENAI_BASE_URL="https://api.openai.com/v1"
 ```
 
 ## Why TreeSearch?
