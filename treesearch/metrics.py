@@ -1,15 +1,79 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Retrieval evaluation metrics for benchmark comparison.
+@description: Retrieval evaluation metrics and cost tracking for benchmark comparison.
 
-Supports: Precision@K, Recall@K, MRR, NDCG@K, Hit@K.
+Supports: Precision@K, Recall@K, MRR, NDCG@K, Hit@K, token/latency cost statistics.
 """
 import math
 import logging
+import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Cost tracking
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CostStats:
+    """Token consumption and latency statistics for a single query or aggregated."""
+    total_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    llm_calls: int = 0
+    latency_seconds: float = 0.0
+    index_tokens: int = 0  # one-time indexing cost (amortized per query when aggregated)
+
+    def to_dict(self) -> dict:
+        return {
+            "total_tokens": self.total_tokens,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "llm_calls": self.llm_calls,
+            "latency_seconds": round(self.latency_seconds, 4),
+            "index_tokens": self.index_tokens,
+        }
+
+
+def aggregate_cost_stats(stats_list: list[CostStats]) -> CostStats:
+    """Compute averaged cost statistics from a list of per-query stats."""
+    if not stats_list:
+        return CostStats()
+    n = len(stats_list)
+    return CostStats(
+        total_tokens=sum(s.total_tokens for s in stats_list) // n,
+        prompt_tokens=sum(s.prompt_tokens for s in stats_list) // n,
+        completion_tokens=sum(s.completion_tokens for s in stats_list) // n,
+        llm_calls=sum(s.llm_calls for s in stats_list) // n,
+        latency_seconds=sum(s.latency_seconds for s in stats_list) / n,
+        index_tokens=stats_list[0].index_tokens if stats_list else 0,
+    )
+
+
+class CostTracker:
+    """Context manager for tracking LLM token consumption and latency."""
+
+    def __init__(self):
+        self._start_time: float = 0.0
+        self.stats = CostStats()
+
+    def __enter__(self):
+        self._start_time = time.time()
+        return self
+
+    def __exit__(self, *args):
+        self.stats.latency_seconds = time.time() - self._start_time
+
+    def record_llm_call(self, prompt_tokens: int = 0, completion_tokens: int = 0):
+        """Record a single LLM call's token usage."""
+        self.stats.prompt_tokens += prompt_tokens
+        self.stats.completion_tokens += completion_tokens
+        self.stats.total_tokens += prompt_tokens + completion_tokens
+        self.stats.llm_calls += 1
 
 
 def precision_at_k(retrieved: list[str], relevant: list[str], k: int) -> float:

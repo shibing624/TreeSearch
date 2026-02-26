@@ -49,6 +49,20 @@ from treesearch.metrics import (
     f1_at_k,
     evaluate_query,
     evaluate_benchmark,
+    CostStats,
+    CostTracker,
+    aggregate_cost_stats,
+)
+
+# Benchmark
+from treesearch.benchmark import (
+    load_dataset,
+    run_benchmark,
+    print_report,
+    print_comparison,
+    BenchmarkSample,
+    BenchmarkReport,
+    SampleResult,
 )
 
 # Tree utilities (for advanced usage)
