@@ -42,8 +42,6 @@ class TestTreeSearchConfig:
         assert c.min_threshold == 0.1
         assert c.max_prompt_tokens == 60000
         # Index
-        assert c.if_add_node_summary is True
-        assert c.if_add_doc_description is True
         assert c.max_concurrency == 5
         assert c.min_token_threshold == 5000
         # FTS

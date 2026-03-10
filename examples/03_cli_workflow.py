@@ -21,6 +21,7 @@ from treesearch import build_index, search, load_documents
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "markdowns")
 INDEX_DIR = os.path.join(os.path.dirname(__file__), "indexes", "cli_demo")
+INDEX_DB = os.path.join(INDEX_DIR, "index.db")
 
 
 async def main():
@@ -72,8 +73,8 @@ async def main():
 
     # Alternative: load documents from disk later
     print("=== Alternative: Load from disk ===")
-    loaded_docs = load_documents(INDEX_DIR)
-    print(f"Loaded {len(loaded_docs)} documents from {INDEX_DIR}")
+    loaded_docs = load_documents(INDEX_DB)
+    print(f"Loaded {len(loaded_docs)} documents from {INDEX_DB}")
 
     # Equivalent CLI commands
     print("\n=== Equivalent CLI commands ===")

@@ -16,7 +16,7 @@ from typing import Optional
 
 from .llm import achat, achat_with_finish_reason, count_tokens, extract_json
 from .tree import (
-    Document, assign_node_ids, flatten_tree, format_structure, remove_fields, save_index, load_index,
+    Document, assign_node_ids, flatten_tree, format_structure, remove_fields,
 )
 
 logger = logging.getLogger(__name__)
@@ -934,27 +934,11 @@ def _file_hash(fp: str) -> str:
     return h.hexdigest()
 
 
-def _load_index_meta(output_dir: str) -> dict:
-    """Load index metadata (file hashes) for incremental builds."""
-    meta_path = os.path.join(output_dir, "_index_meta.json")
-    if os.path.isfile(meta_path):
-        with open(meta_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-
-def _save_index_meta(output_dir: str, meta: dict) -> None:
-    """Save index metadata to disk."""
-    os.makedirs(output_dir, exist_ok=True)
-    meta_path = os.path.join(output_dir, "_index_meta.json")
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2, ensure_ascii=False)
-
-
 async def build_index(
     paths: list[str],
     output_dir: str = "./indexes",
     *,
+    db_path: str = "",
     model: Optional[str] = None,
     if_add_node_summary: Optional[bool] = None,
     if_add_doc_description: Optional[bool] = None,
@@ -971,7 +955,8 @@ async def build_index(
 
     Args:
         paths: list of file paths or glob patterns (e.g. ["docs/*.md", "paper.txt"])
-        output_dir: directory to save index JSON files
+        output_dir: directory for the database file (used to derive db_path if db_path is empty)
+        db_path: path to the SQLite database file. If empty, defaults to ``{output_dir}/index.db``.
         max_concurrency: max concurrent indexing tasks
         force: force re-index even if file unchanged (default: False)
         **kwargs: passed through to individual parsers
@@ -980,6 +965,7 @@ async def build_index(
         list of Document objects (directly usable with search())
     """
     from .config import get_config
+    from .fts import FTS5Index
     cfg = get_config()
 
     # Resolve defaults from config
@@ -995,6 +981,12 @@ async def build_index(
         if_add_node_id = cfg.if_add_node_id
     if max_concurrency is None:
         max_concurrency = cfg.max_concurrency
+
+    # Resolve db_path
+    if not db_path:
+        db_path = os.path.join(output_dir, "index.db")
+    os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+
     # Expand globs
     expanded = []
     for p in paths:
@@ -1010,20 +1002,23 @@ async def build_index(
     if not expanded:
         raise FileNotFoundError(f"No files found for patterns: {paths}")
 
-    # Incremental indexing: check file hashes
-    meta = _load_index_meta(output_dir) if not force else {}
+    # Incremental indexing: check file hashes via DB
+    fts = FTS5Index(db_path=db_path)
     to_index = []
     skipped = []
     file_hashes = {}
     for fp in expanded:
         fh = _file_hash(fp)
         file_hashes[fp] = fh
-        name = os.path.splitext(os.path.basename(fp))[0]
-        out_path = os.path.join(output_dir, f"{name}_structure.json")
-        if not force and meta.get(fp) == fh and os.path.isfile(out_path):
-            skipped.append(fp)
-        else:
-            to_index.append(fp)
+        if not force:
+            stored_hash = fts.get_index_meta(fp)
+            if stored_hash == fh:
+                # Check if document also exists in DB
+                name = os.path.splitext(os.path.basename(fp))[0]
+                if fts.is_document_indexed(name):
+                    skipped.append(fp)
+                    continue
+        to_index.append(fp)
 
     if skipped:
         logger.info("Skipped %d unchanged file(s)", len(skipped))
@@ -1054,29 +1049,40 @@ async def build_index(
 
             # Tag source_type for search routing
             result["source_type"] = SOURCE_TYPE_MAP.get(ext, "text")
-
-            name = os.path.splitext(os.path.basename(fp))[0]
-            out_path = os.path.join(output_dir, f"{name}_structure.json")
-            save_index(result, out_path)
-            logger.info("Indexed: %s -> %s", fp, out_path)
             return result
 
     results = await asyncio.gather(*(_index_one(fp) for fp in to_index))
 
-    # Collect all Document objects (load from saved files for cache consistency)
+    # Save results to DB and collect Document objects
+    result_map = dict(zip(to_index, results))
     documents = []
-    result_iter = iter(results)
+
     for fp in expanded:
         name = os.path.splitext(os.path.basename(fp))[0]
-        out_path = os.path.join(output_dir, f"{name}_structure.json")
-        if fp not in skipped:
-            next(result_iter)  # consume the result (already saved to disk)
-        doc = load_index(out_path)
+        if fp in result_map:
+            result = result_map[fp]
+            doc = Document(
+                doc_id=name,
+                doc_name=result.get("doc_name", name),
+                structure=result.get("structure", []),
+                doc_description=result.get("doc_description", ""),
+                metadata={"source_path": result.get("source_path", "")},
+                source_type=result.get("source_type", ""),
+            )
+            fts.save_document(doc)
+            fts.index_document(doc, force=True)
+            logger.info("Indexed: %s -> %s (doc_id=%s)", fp, db_path, name)
+        else:
+            # Skipped file: load from DB
+            doc = fts.load_document(name)
+            if doc is None:
+                logger.warning("Skipped file %s but document not found in DB, re-indexing", fp)
+                continue
         documents.append(doc)
 
     # Update metadata
     for fp in expanded:
-        meta[fp] = file_hashes[fp]
-    _save_index_meta(output_dir, meta)
+        fts.set_index_meta(fp, file_hashes[fp])
 
+    fts.close()
     return documents

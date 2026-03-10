@@ -88,7 +88,7 @@ async def demo_lower_level_apis():
     print("\nTable of Contents:")
     print_toc(result["structure"])
 
-    output_path = "indexes/voice-call_structure.json"
+    output_path = "indexes/voice-call.db"
     save_index(result, output_path)
     print(f"\nIndex saved to: {output_path}")
 

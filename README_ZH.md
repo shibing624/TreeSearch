@@ -16,9 +16,9 @@
 [![GitHub issues](https://img.shields.io/github/issues/shibing624/TreeSearch.svg)](https://github.com/shibing624/TreeSearch/issues)
 [![Wechat Group](https://img.shields.io/badge/wechat-group-green.svg?logo=wechat)](#社区与支持)
 
-**TreeSearch** 是一个结构感知的文档检索库。将文档解析为树结构，然后通过 FTS5/BM25 关键词匹配或 LLM 推理进行检索。支持 Markdown、纯文本、代码文件（Python AST + 正则、Java/Go/JS/C++ 等）、HTML、XML、JSON、CSV、PDF 和 DOCX。无需向量嵌入，无需分块。
+**TreeSearch** 是一个结构感知的文档检索库。将文档解析为树结构，然后通过 FTS5/BM25 关键词匹配或 LLM 推理进行检索。支持 Markdown、纯文本、代码文件（Python AST + 正则、Java/Go/JS/C++ 等）、HTML、XML、JSON、CSV、PDF 和 DOCX。无需向量embedding，无需分chunk。
 
-毫秒检索万级文档和大型代码库，并保留文档结构。
+毫秒检索万级文档和大型代码库，并保留文档结构，避免上下文丢失。
 
 ## 安装
 
@@ -32,25 +32,13 @@ pip install -U pytreesearch
 from treesearch import TreeSearch
 
 # 懒加载索引 —— 首次搜索时自动构建索引
-ts = TreeSearch("docs/*.md", "src/*.py", model="gpt-4o")
+ts = TreeSearch("docs/*.md", "src/*.py")
 results = ts.search("认证系统如何工作？")
 for doc in results["documents"]:
     for node in doc["nodes"]:
         print(f"[{node['score']:.2f}] {node['title']}")
 ```
 
-FTS5/BM25 策略无需 API Key 即可开箱即用。若需 LLM 增强策略（`best_first`），请先设置 API Key：
-
-```bash
-# 推荐：TreeSearch 专属环境变量（优先级最高）
-export TREESEARCH_LLM_API_KEY="sk-..."
-export TREESEARCH_LLM_BASE_URL="https://api.openai.com/v1"
-export TREESEARCH_MODEL="gpt-4o"
-
-# 备选：OpenAI 兼容环境变量（回退）
-export OPENAI_API_KEY="sk-..."
-export OPENAI_BASE_URL="https://api.openai.com/v1"
-```
 
 ## 为什么选择 TreeSearch？
 
@@ -74,7 +62,6 @@ TreeSearch：
 | **多文档** | 需要向量数据库路由 | LLM 根据文档描述路由 |
 | **结构** | 分块后丢失 | 完整保留为树形层级 |
 | **依赖** | 向量数据库 + 嵌入模型 | 仅 SQLite（LLM 可选，无嵌入、无向量库） |
-| **零成本基线** | 无 | FTS5 独立搜索（无需 LLM） |
 
 ### 核心优势
 
@@ -85,7 +72,6 @@ TreeSearch：
 - **无需向量嵌入** — 不需要训练、部署或付费使用嵌入模型
 - **无需分块** — 文档保留自然的标题层级结构
 - **无需向量数据库** — 不需要 Pinecone、Milvus 或 Chroma
-- **LLM 预算控制** — 设定每次查询的最大 LLM 调用次数，置信度高时提前停止
 
 ## 功能特性
 
@@ -101,7 +87,6 @@ TreeSearch：
 - **多文档搜索** — 通过 LLM 推理在文档集合间路由查询
 - **中英文支持** — 内置 jieba 中文分词和英文正则分词
 - **批量索引** — `build_index()` 支持 glob 模式并发多文件处理
-- **评估指标** — Precision@K、Recall@K、MRR、NDCG@K、Hit@K、F1@K（位于 `examples/benchmark/metrics.py`）
 - **异步优先** — 所有核心函数均为异步，提供同步适配器
 - **配置驱动默认值** — `search()` 和 `build_index()` 从 `get_config()` 读取默认值，支持按调用覆盖
 - **CLI 命令** — `treesearch index` 和 `treesearch search` 命令
@@ -180,6 +165,19 @@ treesearch search --index_dir ./indexes/ --query "认证" --max-llm-calls 10
 | `best_first` | FTS5/BM25 预打分 + 优先队列 + LLM 评估 | 中等（预算控制） | 准确率最高 |
 | `auto` | 根据 `source_type` 按文档选择策略（代码 → GrepFilter + FTS5） | 视情况而定 | 混合文件类型 |
 | FTS5 独立 | `FTS5Index.search()` | 零 | 持久化倒排索引，无需 API Key |
+
+FTS5/BM25 策略无需 API Key 即可开箱即用。若需 LLM 增强策略（`best_first`），请先设置 API Key：
+
+```bash
+# 推荐：TreeSearch 专属环境变量（优先级最高）
+export TREESEARCH_LLM_API_KEY="sk-..."
+export TREESEARCH_LLM_BASE_URL="https://api.openai.com/v1"
+export TREESEARCH_MODEL="gpt-4o"
+
+# 备选：OpenAI 兼容环境变量（回退）
+export OPENAI_API_KEY="sk-..."
+export OPENAI_BASE_URL="https://api.openai.com/v1"
+```
 
 ## 适用场景
 

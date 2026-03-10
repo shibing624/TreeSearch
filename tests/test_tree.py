@@ -109,51 +109,44 @@ class TestFormatStructure:
 class TestSaveLoadIndex:
     def test_round_trip(self, sample_tree_structure):
         index = {"doc_name": "test", "structure": sample_tree_structure, "source_path": "/tmp/test.md"}
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            path = f.name
-        try:
-            save_index(index, path)
-            doc = load_index(path)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            save_index(index, db_path, doc_id="test")
+            doc = load_index(db_path, doc_id="test")
             assert isinstance(doc, Document)
             assert doc.doc_name == "test"
             assert len(doc.structure) == 2
             assert doc.metadata.get("source_path") == "/tmp/test.md"
-        finally:
-            os.unlink(path)
 
     def test_load_returns_fresh_object(self, sample_tree_structure):
         index = {"doc_name": "cached", "structure": sample_tree_structure}
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            path = f.name
-        try:
-            save_index(index, path)
-            doc1 = load_index(path)
-            doc2 = load_index(path)
-            # No cache: each call returns a new Document
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            save_index(index, db_path, doc_id="cached")
+            doc1 = load_index(db_path, doc_id="cached")
+            doc2 = load_index(db_path, doc_id="cached")
+            # Each call returns a new Document
             assert doc1 is not doc2
             assert doc1.doc_name == doc2.doc_name
-        finally:
-            os.unlink(path)
 
-    def test_load_documents_from_dir(self, sample_tree_structure):
+    def test_load_documents_from_db(self, sample_tree_structure):
         with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
             for name in ["alpha", "beta"]:
                 index = {"doc_name": name, "structure": sample_tree_structure}
-                save_index(index, os.path.join(tmpdir, f"{name}_structure.json"))
-            # Add a meta file that should be skipped
-            with open(os.path.join(tmpdir, "_index_meta.json"), "w") as f:
-                json.dump({"meta": True}, f)
+                save_index(index, db_path, doc_id=name)
 
-            docs = load_documents(tmpdir)
+            docs = load_documents(db_path)
             assert len(docs) == 2
-            assert docs[0].doc_name == "alpha"
-            assert docs[1].doc_name == "beta"
+            names = [d.doc_name for d in docs]
+            assert "alpha" in names
+            assert "beta" in names
 
     def test_creates_directory(self, sample_tree_structure):
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "sub", "dir", "out.json")
-            save_index({"data": 1}, path)
-            assert os.path.isfile(path)
+            db_path = os.path.join(tmpdir, "sub", "dir", "out.db")
+            save_index({"doc_name": "test", "structure": sample_tree_structure}, db_path, doc_id="test")
+            assert os.path.isfile(db_path)
 
 
 class TestDocument:

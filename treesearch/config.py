@@ -53,8 +53,8 @@ class TreeSearchConfig:
 
     Priority: set_config() > env vars > defaults.
     """
-    # LLM
-    model: str = "gpt-4o"
+    # LLM (optional, leave empty to disable LLM features)
+    model: str = ""
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     thinking_type: str = "disabled"  # "disabled" | "enabled" | "auto"
@@ -88,7 +88,7 @@ class TreeSearchConfig:
 
     # FTS
     fts_enabled: bool = True
-    fts_db_path: str = ""  # empty = in-memory
+    fts_db_path: str = ""  # empty = same DB as tree storage (default: index.db)
     fts_title_weight: float = 5.0
     fts_summary_weight: float = 2.0
     fts_body_weight: float = 10.0

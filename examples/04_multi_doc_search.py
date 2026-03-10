@@ -20,10 +20,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from treesearch import TreeSearch, NodeBM25Index, GrepFilter
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "markdowns")
-INDEX_DIR = os.path.join(os.path.dirname(__file__), "indexes", "multi_doc_demo")
+INDEX_DB = os.path.join(os.path.dirname(__file__), "indexes", "multi_doc_demo", "index.db")
 
 # 1. Create engine and index
-ts = TreeSearch(index_dir=INDEX_DIR)
+ts = TreeSearch(db_path=INDEX_DB)
 ts.index(f"{DATA_DIR}/*.md")
 print(f"Indexed {len(ts.documents)} documents: {[d.doc_name for d in ts.documents]}\n")
 

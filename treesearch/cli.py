@@ -15,11 +15,12 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 
 from treesearch.indexer import build_index, md_to_tree, text_to_tree
-from treesearch.tree import Document, save_index, load_documents, print_toc
+from treesearch.tree import Document, load_documents, print_toc
 from treesearch.search import search
 from treesearch.config import get_config, set_config, TreeSearchConfig
 
@@ -35,7 +36,9 @@ def _add_index_args(sub: argparse.ArgumentParser) -> None:
                      help="File paths or glob patterns (e.g. 'docs/*.md' paper.txt)")
 
     sub.add_argument("-o", "--output_dir", type=str, default="./indexes",
-                     help="Output directory for index JSON files (default: ./indexes)")
+                     help="Output directory for database file (default: ./indexes)")
+    sub.add_argument("--db", type=str, default="",
+                     help="Path to SQLite database file (default: {output_dir}/index.db)")
     sub.add_argument("--model", type=str, default="gpt-4o-2024-11-20", help="LLM model name")
     sub.add_argument("--api-key", type=str, default=None,
                      help="LLM API key (overrides TREESEARCH_LLM_API_KEY / OPENAI_API_KEY)")
@@ -69,6 +72,7 @@ async def _run_index(args) -> None:
     results = await build_index(
         paths=args.paths,
         output_dir=args.output_dir,
+        db_path=args.db,
         model=args.model,
         if_add_node_summary=not args.no_summary,
         if_add_doc_description=args.add_description,
@@ -81,8 +85,9 @@ async def _run_index(args) -> None:
         force=args.force,
     )
 
+    db_path = args.db or os.path.join(args.output_dir, "index.db")
     elapsed = time.time() - start_time
-    print(f"\nIndexed {len(results)} file(s) to {args.output_dir}/ ({elapsed:.1f}s)")
+    print(f"\nIndexed {len(results)} file(s) to {db_path} ({elapsed:.1f}s)")
     for doc in results:
         print(f"  - {doc.doc_name}")
         print(f"    TOC:")
@@ -94,8 +99,10 @@ async def _run_index(args) -> None:
 # ---------------------------------------------------------------------------
 
 def _add_search_args(sub: argparse.ArgumentParser) -> None:
-    sub.add_argument("--index_dir", type=str, required=True,
-                     help="Directory containing index JSON files")
+    sub.add_argument("--index_dir", type=str, default="./indexes",
+                     help="Directory containing the database file (default: ./indexes)")
+    sub.add_argument("--db", type=str, default="",
+                     help="Path to SQLite database file (default: {index_dir}/index.db)")
     sub.add_argument("--query", type=str, required=True,
                      help="Search query")
     sub.add_argument("--model", type=str, default="gpt-4o-2024-11-20", help="LLM model name")
@@ -120,11 +127,15 @@ def _add_search_args(sub: argparse.ArgumentParser) -> None:
                      help="Disable BM25 pre-scoring for best_first strategy")
 
 
-def _load_documents_from_dir(index_dir: str) -> list[Document]:
-    """Load all index JSON files from a directory into Document objects."""
-    documents = load_documents(index_dir)
+def _load_documents_from_dir(index_dir: str, db: str = "") -> list[Document]:
+    """Load all documents from a database file."""
+    db_path = db or os.path.join(index_dir, "index.db")
+    if not os.path.isfile(db_path):
+        print(f"Database file not found: {db_path}", file=sys.stderr)
+        sys.exit(1)
+    documents = load_documents(db_path)
     if not documents:
-        print(f"No JSON index files found in: {index_dir}", file=sys.stderr)
+        print(f"No documents found in database: {db_path}", file=sys.stderr)
         sys.exit(1)
     for doc in documents:
         logger.info("Loaded document: %s (%d root nodes)", doc.doc_name, len(doc.structure))
@@ -145,8 +156,9 @@ async def _run_search(args) -> None:
             cfg.fts_db_path = args.fts_db
         set_config(cfg)
 
-    documents = _load_documents_from_dir(args.index_dir)
-    print(f"Loaded {len(documents)} document(s) from {args.index_dir}")
+    documents = _load_documents_from_dir(args.index_dir, db=args.db)
+    db_path = args.db or os.path.join(args.index_dir, "index.db")
+    print(f"Loaded {len(documents)} document(s) from {db_path}")
     for doc in documents:
         print(f"  - {doc.doc_name}")
 

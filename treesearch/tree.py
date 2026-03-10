@@ -4,7 +4,6 @@
 @description: Tree structure data models and operations.
 """
 import copy
-import glob as globmod
 import json
 import logging
 import os
@@ -156,57 +155,76 @@ def format_structure(structure, order: list[str] = None):
 
 
 # ---------------------------------------------------------------------------
-# Persistence
+# Persistence (SQLite DB via FTS5Index)
 # ---------------------------------------------------------------------------
 
 INDEX_VERSION = "1.0"
 
 
-def save_index(index: dict, path: str) -> None:
-    """Save tree structure index to a JSON file with version metadata."""
-    index["index_version"] = INDEX_VERSION
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(index, f, indent=2, ensure_ascii=False)
-    logger.info("Index saved to: %s", path)
+def save_index(index: dict, db_path: str, doc_id: str = "") -> None:
+    """Save tree structure index into a SQLite database.
 
-
-def load_index(path: str) -> Document:
-    """Load a single index JSON file and return a Document object."""
-    abs_path = os.path.abspath(path)
-
-    with open(abs_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    file_version = data.get("index_version", "unknown")
-    if file_version != INDEX_VERSION:
-        logger.warning("Index version mismatch: file=%s, expected=%s, path=%s",
-                       file_version, INDEX_VERSION, abs_path)
-
-    basename = os.path.basename(abs_path)
-    doc_id = os.path.splitext(basename)[0].replace("_structure", "")
+    Args:
+        index: dict with 'doc_name', 'structure', and optional metadata.
+        db_path: path to the .db file.
+        doc_id: explicit doc_id. If empty, derived from doc_name.
+    """
+    from .fts import FTS5Index
+    doc_name = index.get("doc_name", "untitled")
+    if not doc_id:
+        doc_id = doc_name
     doc = Document(
         doc_id=doc_id,
-        doc_name=data.get("doc_name", doc_id),
-        structure=data.get("structure", []),
-        doc_description=data.get("doc_description", ""),
-        metadata={"source_path": data.get("source_path", "")},
-        source_type=data.get("source_type", ""),
+        doc_name=doc_name,
+        structure=index.get("structure", []),
+        doc_description=index.get("doc_description", ""),
+        metadata={"source_path": index.get("source_path", "")},
+        source_type=index.get("source_type", ""),
     )
+    fts = FTS5Index(db_path=db_path)
+    fts.save_document(doc)
+    fts.index_document(doc)
+    fts.close()
+    logger.info("Index saved to DB: %s (doc_id=%s)", db_path, doc_id)
+
+
+def load_index(db_path: str, doc_id: str = "") -> Document:
+    """Load a single Document from a SQLite database.
+
+    Args:
+        db_path: path to the .db file.
+        doc_id: the document to load. If empty, loads the first document found.
+
+    Returns:
+        Document object.
+    """
+    from .fts import FTS5Index
+    fts = FTS5Index(db_path=db_path)
+    if doc_id:
+        doc = fts.load_document(doc_id)
+    else:
+        docs = fts.load_all_documents()
+        doc = docs[0] if docs else None
+    fts.close()
+    if doc is None:
+        raise FileNotFoundError(f"No document found in DB: {db_path} (doc_id={doc_id!r})")
     return doc
 
 
-def load_documents(index_dir: str) -> list[Document]:
-    """Load all index JSON files from a directory and return a list of Documents.
+def load_documents(db_path: str) -> list[Document]:
+    """Load all Documents from a SQLite database.
 
-    Skips meta files (starting with '_').
+    Args:
+        db_path: path to the .db file.
+
+    Returns:
+        List of Document objects.
     """
-    pattern = os.path.join(index_dir, "*.json")
-    files = sorted(
-        f for f in globmod.glob(pattern)
-        if not os.path.basename(f).startswith("_")
-    )
-    return [load_index(f) for f in files]
+    from .fts import FTS5Index
+    fts = FTS5Index(db_path=db_path)
+    docs = fts.load_all_documents()
+    fts.close()
+    return docs
 
 
 # ---------------------------------------------------------------------------

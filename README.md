@@ -32,24 +32,11 @@ pip install -U pytreesearch
 from treesearch import TreeSearch
 
 # Lazy indexing — auto-builds index on first search
-ts = TreeSearch("docs/*.md", "src/*.py", model="gpt-4o")
+ts = TreeSearch("docs/*.md", "src/*.py")
 results = ts.search("How does auth work?")
 for doc in results["documents"]:
     for node in doc["nodes"]:
         print(f"[{node['score']:.2f}] {node['title']}")
-```
-
-FTS5/BM25 strategies work out of the box with no API key. For LLM-enhanced strategy (`best_first`), set up API key:
-
-```bash
-# Recommended: TreeSearch-specific environment variables (highest priority)
-export TREESEARCH_LLM_API_KEY="sk-..."
-export TREESEARCH_LLM_BASE_URL="https://api.openai.com/v1"
-export TREESEARCH_MODEL="gpt-4o"
-
-# Alternative: OpenAI-compatible environment variables (fallback)
-export OPENAI_API_KEY="sk-..."
-export OPENAI_BASE_URL="https://api.openai.com/v1"
 ```
 
 ## Why TreeSearch?
@@ -65,7 +52,6 @@ TreeSearch takes a fundamentally different approach — parse documents into **t
 | **Multi-doc** | Needs vector DB for routing | LLM routes by document descriptions |
 | **Structure** | Lost after chunking | Fully preserved as tree hierarchy |
 | **Dependencies** | Vector DB + embedding model | SQLite only (LLM optional, no embedding, no vector DB) |
-| **Zero-cost baseline** | N/A | FTS5-only search (no LLM needed) |
 
 ### Key Advantages
 
@@ -75,7 +61,6 @@ TreeSearch takes a fundamentally different approach — parse documents into **t
 - **Tree-aware retrieval** — Heading hierarchy guides search, not arbitrary chunk boundaries
 - **SQLite FTS5 pre-filter** (default) — Persistent inverted index with WAL mode, incremental updates, CJK support, and SQL aggregation
 - **BM25 zero-cost baseline** — Instant keyword search with no API calls, useful as standalone or pre-filter
-- **Budget-controlled LLM calls** — Set max LLM calls per query, with early stopping when confidence is high
 
 ## Features
 
@@ -91,7 +76,6 @@ TreeSearch takes a fundamentally different approach — parse documents into **t
 - **Multi-document search** — Route queries across document collections via LLM reasoning
 - **Chinese + English** — Built-in jieba tokenization for Chinese and regex tokenization for English
 - **Batch indexing** — `build_index()` supports glob patterns for concurrent multi-file processing
-- **Evaluation metrics** — Precision@K, Recall@K, MRR, NDCG@K, Hit@K, F1@K (in `examples/benchmark/metrics.py`)
 - **Async-first** — All core functions are async with sync wrappers available
 - **Config-driven defaults** — `search()` and `build_index()` read defaults from `get_config()`, overridable per-call
 - **CLI included** — `treesearch index` and `treesearch search` commands
@@ -170,6 +154,20 @@ Input Documents (MD/TXT/Code/JSON/CSV/HTML/XML/PDF/DOCX)
 | `best_first` | FTS5/BM25 pre-scoring + priority queue + LLM evaluation | Moderate (budget-controlled) | Best accuracy |
 | `auto` | Per-document strategy based on `source_type` (code → GrepFilter + FTS5) | Varies | Mixed file types |
 | FTS5 standalone | `FTS5Index.search()` | Zero | Persistent inverted index, no API key |
+
+
+FTS5/BM25 strategies work out of the box with no API key. For LLM-enhanced strategy (`best_first`), set up API key:
+
+```bash
+# Recommended: TreeSearch-specific environment variables (highest priority)
+export TREESEARCH_LLM_API_KEY="sk-..."
+export TREESEARCH_LLM_BASE_URL="https://api.openai.com/v1"
+export TREESEARCH_MODEL="gpt-4o"
+
+# Alternative: OpenAI-compatible environment variables (fallback)
+export OPENAI_API_KEY="sk-..."
+export OPENAI_BASE_URL="https://api.openai.com/v1"
+```
 
 ## Use Cases
 

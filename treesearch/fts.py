@@ -3,30 +3,30 @@
 @author:XuMing(xuming624@qq.com)
 @description: SQLite FTS5 full-text search engine for tree-structured documents.
 
-Third-generation retrieval: neither pre-computed BM25 indexes nor brute-force
-grep, but LLM-driven dynamic query generation + local real-time indexing via
-SQLite FTS5 inverted index.
+Single-file storage: tree structures, FTS5 indexes, and incremental metadata
+are all stored in one SQLite database (.db file).
 
 Architecture: "SQLite FTS5 + Producer-Consumer + LLM Query Generation"
   - Deferred indexing via WAL mode solves real-time freshness
   - Local SQL execution handles aggregation needs
   - FTS5 inverted index guarantees retrieval performance
+  - Tree structure persistence in `documents.structure_json` column
 
 Key features:
   - WAL mode for concurrent read/write
   - Lazy indexing: nodes are inserted on demand, not precomputed
   - MD-aware schema: front_matter, title, summary, body, code_blocks
-  - Custom tokenizer bridge for Chinese/English via jieba
+  - CJK-aware tokenizer: jieba segmentation only when Chinese text is detected
   - Implements PreFilter protocol for seamless integration with search()
   - Hierarchical field boosting via FTS5 column weighting
   - LLM-generated FTS5 query expressions (AND/OR/NOT/NEAR)
 """
 import hashlib
+import json
 import logging
 import os
 import re
 import sqlite3
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -95,27 +95,41 @@ def parse_md_node_text(text: str) -> dict:
 # Tokenizer for FTS5 (Chinese/English)
 # ---------------------------------------------------------------------------
 
+_RE_HAS_CJK = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
+
+
 def _tokenize_for_fts(text: str) -> str:
     """Tokenize text for FTS5 indexing. Space-separated tokens.
 
-    Uses jieba for Chinese, whitespace for English. The result is stored
-    as a space-separated string so FTS5's default tokenizer can split it.
+    Only uses jieba segmentation when Chinese (CJK) characters are detected.
+    For pure English/non-CJK text, relies on FTS5's built-in unicode61 tokenizer
+    (no jieba overhead).
     """
-    from .rank_bm25 import tokenize
-    tokens = tokenize(text)
-    return " ".join(tokens)
+    if not text or not text.strip():
+        return ""
+    if _RE_HAS_CJK.search(text):
+        from .rank_bm25 import tokenize
+        tokens = tokenize(text)
+        return " ".join(tokens)
+    # English / non-CJK: return as-is, FTS5 unicode61 handles tokenization
+    return text
 
 
 # FTS5 operators that should NOT be tokenized
 _FTS5_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
+
+# Characters that have special meaning in FTS5 query syntax
+_RE_FTS5_SPECIAL = re.compile(r'[?*"()\^{}]')
 
 
 def _tokenize_fts_expression(expr: str) -> str:
     """Tokenize terms in an FTS5 expression while preserving operators.
 
     Raw FTS5 expressions like ``"machine AND learning"`` must have their
-    terms tokenized (stemmed) to match the indexed content, but FTS5
+    terms tokenized to match the indexed content, but FTS5
     operators (AND, OR, NOT, NEAR) must remain untouched.
+
+    Only applies jieba segmentation when CJK characters are detected.
     """
     parts = expr.split()
     result = []
@@ -201,16 +215,35 @@ class FTS5Index:
             )
         """)
 
-        # Document metadata table
+        # Document metadata table (also stores tree structure for persistence)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS documents (
                 doc_id TEXT PRIMARY KEY,
                 doc_name TEXT DEFAULT '',
                 doc_description TEXT DEFAULT '',
+                source_path TEXT DEFAULT '',
+                source_type TEXT DEFAULT '',
+                structure_json TEXT DEFAULT '',
                 node_count INTEGER DEFAULT 0,
                 index_hash TEXT
             )
         """)
+
+        # Incremental index metadata (replaces _index_meta.json)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS index_meta (
+                source_path TEXT PRIMARY KEY,
+                file_hash TEXT NOT NULL
+            )
+        """)
+
+        # Performance indexes for large-scale document sets (10k+ docs)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_nodes_doc_id ON nodes (doc_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documents_source_path ON documents (source_path)"
+        )
 
         self._conn.commit()
 
@@ -244,7 +277,6 @@ class FTS5Index:
         from .tree import flatten_tree
 
         # Compute content hash for incremental check
-        import json
         content_str = json.dumps(document.structure, ensure_ascii=False, sort_keys=True)
         content_hash = hashlib.md5(content_str.encode()).hexdigest()
 
@@ -259,7 +291,16 @@ class FTS5Index:
                 return 0
 
         # Clear old entries for this document
-        self._conn.execute("DELETE FROM fts_nodes WHERE doc_id = ?", (document.doc_id,))
+        # FTS5 UNINDEXED columns can't be indexed, so use rowid-based delete for performance
+        old_rowids = self._conn.execute(
+            "SELECT rowid FROM fts_nodes WHERE doc_id = ?", (document.doc_id,)
+        ).fetchall()
+        if old_rowids:
+            placeholders = ",".join("?" for _ in old_rowids)
+            self._conn.execute(
+                f"DELETE FROM fts_nodes WHERE rowid IN ({placeholders})",
+                [r[0] for r in old_rowids],
+            )
         self._conn.execute("DELETE FROM nodes WHERE doc_id = ?", (document.doc_id,))
 
         # Flatten tree and index each node
@@ -324,11 +365,19 @@ class FTS5Index:
             )
             count += 1
 
-        # Update document metadata
+        # Update document metadata (including tree structure)
+        structure_json = json.dumps(document.structure, ensure_ascii=False)
         self._conn.execute(
-            """INSERT OR REPLACE INTO documents (doc_id, doc_name, doc_description, node_count, index_hash)
-               VALUES (?, ?, ?, ?, ?)""",
-            (document.doc_id, document.doc_name, document.doc_description, count, content_hash),
+            """INSERT OR REPLACE INTO documents
+               (doc_id, doc_name, doc_description, source_path, source_type, structure_json, node_count, index_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                document.doc_id, document.doc_name, document.doc_description,
+                document.metadata.get("source_path", ""),
+                document.source_type,
+                structure_json,
+                count, content_hash,
+            ),
         )
 
         self._conn.commit()
@@ -378,11 +427,19 @@ class FTS5Index:
             if not tokens.strip():
                 return []
             words = tokens.split()
-            if len(words) > 1:
+            # Strip FTS5 special characters from each token
+            clean_words = []
+            for w in words:
+                cleaned = _RE_FTS5_SPECIAL.sub("", w).strip()
+                if cleaned:
+                    clean_words.append(cleaned)
+            if not clean_words:
+                return []
+            if len(clean_words) > 1:
                 # Use OR for recall; FTS5 bm25() naturally ranks multi-term matches higher
-                match_expr = " OR ".join(words)
+                match_expr = " OR ".join(clean_words)
             else:
-                match_expr = words[0]
+                match_expr = clean_words[0]
 
         # Phase 1: phrase boosting for multi-word queries
         # Run a separate phrase match query and record which nodes get a boost
@@ -574,6 +631,139 @@ class FTS5Index:
         return {nid: round(s, 6) for nid, s in scores.items()}
 
     # -------------------------------------------------------------------
+    # Document persistence (tree structure storage)
+    # -------------------------------------------------------------------
+
+    def save_document(self, document) -> None:
+        """Save/update a Document's tree structure into the DB.
+
+        This persists the tree structure so that JSON files are no longer needed.
+        FTS indexing is NOT performed here — call index_document() separately.
+        """
+        structure_json = json.dumps(document.structure, ensure_ascii=False)
+        content_hash = hashlib.md5(structure_json.encode()).hexdigest()
+        self._conn.execute(
+            """INSERT OR REPLACE INTO documents
+               (doc_id, doc_name, doc_description, source_path, source_type, structure_json, node_count, index_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                document.doc_id, document.doc_name, document.doc_description,
+                document.metadata.get("source_path", ""),
+                document.source_type,
+                structure_json,
+                len(list(self._iter_flat_nodes(document.structure))),
+                content_hash,
+            ),
+        )
+        self._conn.commit()
+
+    @staticmethod
+    def _iter_flat_nodes(structure):
+        """Iterate over all nodes in a tree structure."""
+        if isinstance(structure, dict):
+            yield structure
+            for child in structure.get("nodes", []):
+                yield from FTS5Index._iter_flat_nodes(child)
+        elif isinstance(structure, list):
+            for item in structure:
+                yield from FTS5Index._iter_flat_nodes(item)
+
+    def load_document(self, doc_id: str):
+        """Load a single Document from the DB by doc_id.
+
+        Returns:
+            Document object, or None if not found.
+        """
+        from .tree import Document
+        row = self._conn.execute(
+            "SELECT doc_id, doc_name, doc_description, source_path, source_type, structure_json FROM documents WHERE doc_id = ?",
+            (doc_id,),
+        ).fetchone()
+        if not row:
+            return None
+        structure = json.loads(row[5]) if row[5] else []
+        return Document(
+            doc_id=row[0],
+            doc_name=row[1],
+            structure=structure,
+            doc_description=row[2] or "",
+            metadata={"source_path": row[3] or ""},
+            source_type=row[4] or "",
+        )
+
+    def load_all_documents(self) -> list:
+        """Load all Documents stored in the DB.
+
+        Returns:
+            List of Document objects.
+        """
+        from .tree import Document
+        rows = self._conn.execute(
+            "SELECT doc_id, doc_name, doc_description, source_path, source_type, structure_json FROM documents ORDER BY doc_id"
+        ).fetchall()
+        documents = []
+        for row in rows:
+            structure = json.loads(row[5]) if row[5] else []
+            documents.append(Document(
+                doc_id=row[0],
+                doc_name=row[1],
+                structure=structure,
+                doc_description=row[2] or "",
+                metadata={"source_path": row[3] or ""},
+                source_type=row[4] or "",
+            ))
+        return documents
+
+    def remove_document(self, doc_id: str) -> None:
+        """Remove a document and all its indexed nodes from the DB."""
+        # FTS5 UNINDEXED columns can't be indexed, so use rowid-based delete for performance
+        old_rowids = self._conn.execute(
+            "SELECT rowid FROM fts_nodes WHERE doc_id = ?", (doc_id,)
+        ).fetchall()
+        if old_rowids:
+            placeholders = ",".join("?" for _ in old_rowids)
+            self._conn.execute(
+                f"DELETE FROM fts_nodes WHERE rowid IN ({placeholders})",
+                [r[0] for r in old_rowids],
+            )
+        self._conn.execute("DELETE FROM nodes WHERE doc_id = ?", (doc_id,))
+        self._conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
+        self._conn.commit()
+
+    # -------------------------------------------------------------------
+    # Index metadata (replaces _index_meta.json)
+    # -------------------------------------------------------------------
+
+    def get_index_meta(self, source_path: str) -> Optional[str]:
+        """Get the stored file hash for a source path.
+
+        Returns:
+            File hash string, or None if not tracked.
+        """
+        row = self._conn.execute(
+            "SELECT file_hash FROM index_meta WHERE source_path = ?",
+            (source_path,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_index_meta(self, source_path: str, file_hash: str) -> None:
+        """Store/update the file hash for a source path."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO index_meta (source_path, file_hash) VALUES (?, ?)",
+            (source_path, file_hash),
+        )
+        self._conn.commit()
+
+    def get_all_index_meta(self) -> dict[str, str]:
+        """Get all stored file hashes.
+
+        Returns:
+            Dict mapping source_path -> file_hash.
+        """
+        rows = self._conn.execute("SELECT source_path, file_hash FROM index_meta").fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    # -------------------------------------------------------------------
     # FTS5 query expression builder
     # -------------------------------------------------------------------
 
@@ -672,6 +862,7 @@ class FTS5Index:
         self._conn.execute("DELETE FROM fts_nodes")
         self._conn.execute("DELETE FROM nodes")
         self._conn.execute("DELETE FROM documents")
+        self._conn.execute("DELETE FROM index_meta")
         self._conn.commit()
 
     def is_document_indexed(self, doc_id: str) -> bool:

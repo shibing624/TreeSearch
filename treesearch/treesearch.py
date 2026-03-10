@@ -5,6 +5,9 @@
 
 This is the ONLY class most users need. It wraps indexing, searching,
 saving, and loading into a single, minimal API.
+
+All data (tree structures, FTS5 indexes, incremental metadata) is stored
+in a single SQLite .db file — no more scattered JSON files.
 """
 import asyncio
 import glob
@@ -12,7 +15,7 @@ import logging
 import os
 from typing import Optional, List
 
-from .tree import Document, load_documents, save_index as _save_index
+from .tree import Document, load_documents
 from .search import search
 from .config import get_config
 
@@ -35,15 +38,15 @@ class TreeSearch:
         ts = TreeSearch("docs/*.md", "src/*.py")
         results = ts.search("How to configure voice calls?")
 
-        # Save / load indexes for later reuse
-        ts.save_index("./my_indexes")
-        ts.load_index("./my_indexes")
+        # Save / load indexes via single DB file
+        ts.save_index("./my_index.db")
+        ts.load_index("./my_index.db")
     """
 
     def __init__(
         self,
         *paths: str,
-        index_dir: str = "./indexes",
+        db_path: str = "./index.db",
         model: Optional[str] = None,
         strategy: str = "fts5_only",
         **kwargs
@@ -53,13 +56,13 @@ class TreeSearch:
 
         Args:
             *paths: File paths or glob patterns to index lazily on first search.
-            index_dir: Default directory to save/load indexes.
+            db_path: Path to the SQLite database file for all data storage.
             model: LLM model name (for 'best_first' strategy).
             strategy: Default search strategy. Options: 'fts5_only', 'best_first', 'auto'.
             **kwargs: Additional default arguments for search().
         """
         self._pending_paths: List[str] = list(paths)
-        self.index_dir = index_dir
+        self.db_path = db_path
         self.strategy = strategy
         self.documents: List[Document] = []
         self.config = get_config()
@@ -87,7 +90,7 @@ class TreeSearch:
 
         self.documents = await build_index(
             resolved_paths,
-            output_dir=self.index_dir,
+            db_path=self.db_path,
             force=force,
             **kwargs
         )
@@ -146,8 +149,8 @@ class TreeSearch:
             self._pending_paths.clear()
 
         if not self.documents:
-            if os.path.exists(self.index_dir):
-                self.documents = load_documents(self.index_dir)
+            if os.path.isfile(self.db_path):
+                self.documents = load_documents(self.db_path)
 
         if not self.documents:
             raise ValueError(
@@ -204,43 +207,40 @@ class TreeSearch:
     # Save / Load indexes
     # ------------------------------------------------------------------
 
-    def save_index(self, output_dir: Optional[str] = None) -> str:
-        """Save current indexes to a directory.
+    def save_index(self, db_path: Optional[str] = None) -> str:
+        """Save current documents to a database file.
 
         Args:
-            output_dir: Target directory. Defaults to self.index_dir.
+            db_path: Target database file path. Defaults to self.db_path.
 
         Returns:
-            Path to the output directory.
+            Path to the database file.
         """
-        out = output_dir or self.index_dir
-        os.makedirs(out, exist_ok=True)
+        from .fts import FTS5Index
+        out = db_path or self.db_path
+        os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
 
+        fts = FTS5Index(db_path=out)
         for doc in self.documents:
-            index_data = {
-                "doc_name": doc.doc_name,
-                "structure": doc.structure,
-                "doc_description": doc.doc_description,
-                "source_path": doc.metadata.get("source_path", ""),
-            }
-            filename = f"{doc.doc_name}_structure.json"
-            _save_index(index_data, os.path.join(out, filename))
+            fts.save_document(doc)
+            fts.index_document(doc)
+        fts.close()
 
-        logger.info("Saved %d indexes to %s", len(self.documents), out)
+        logger.info("Saved %d documents to %s", len(self.documents), out)
         return out
 
-    def load_index(self, index_dir: Optional[str] = None) -> List[Document]:
-        """Load indexes from a directory.
+    def load_index(self, db_path: Optional[str] = None) -> List[Document]:
+        """Load documents from a database file.
 
         Args:
-            index_dir: Source directory. Defaults to self.index_dir.
+            db_path: Source database file path. Defaults to self.db_path.
 
         Returns:
             List of loaded Document objects.
         """
-        src = index_dir or self.index_dir
-        if not os.path.exists(src):
-            raise FileNotFoundError(f"Index directory not found: {src}")
+        src = db_path or self.db_path
+        if not os.path.isfile(src):
+            raise FileNotFoundError(f"Database file not found: {src}")
 
         self.documents = load_documents(src)
         logger.info("Loaded %d documents from %s", len(self.documents), src)

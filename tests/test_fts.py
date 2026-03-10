@@ -343,6 +343,53 @@ class TestPersistence:
         fts_index.clear()
         assert fts_index.get_stats()["node_count"] == 0
 
+    def test_save_and_load_document(self, persistent_fts_index, sample_document):
+        """Test document persistence: save + load round-trip."""
+        idx, db_path = persistent_fts_index
+        idx.save_document(sample_document)
+        idx.close()
+
+        idx2 = FTS5Index(db_path=db_path)
+        loaded = idx2.load_document("test_doc")
+        idx2.close()
+
+        assert loaded is not None
+        assert loaded.doc_id == "test_doc"
+        assert loaded.doc_name == "Test Document"
+        assert len(loaded.structure) == 2
+        assert loaded.doc_description == "A test document for FTS5 testing"
+
+    def test_load_all_documents(self, persistent_fts_index, sample_document, chinese_document):
+        idx, db_path = persistent_fts_index
+        idx.save_document(sample_document)
+        idx.save_document(chinese_document)
+        idx.close()
+
+        idx2 = FTS5Index(db_path=db_path)
+        docs = idx2.load_all_documents()
+        idx2.close()
+
+        assert len(docs) == 2
+        doc_ids = {d.doc_id for d in docs}
+        assert "test_doc" in doc_ids
+        assert "cn_doc" in doc_ids
+
+    def test_remove_document(self, fts_index, sample_document):
+        fts_index.index_document(sample_document)
+        fts_index.save_document(sample_document)
+        assert fts_index.is_document_indexed("test_doc")
+        fts_index.remove_document("test_doc")
+        assert not fts_index.is_document_indexed("test_doc")
+        assert fts_index.load_document("test_doc") is None
+
+    def test_index_meta(self, persistent_fts_index):
+        idx, db_path = persistent_fts_index
+        assert idx.get_index_meta("/tmp/test.md") is None
+        idx.set_index_meta("/tmp/test.md", "abc123")
+        assert idx.get_index_meta("/tmp/test.md") == "abc123"
+        meta = idx.get_all_index_meta()
+        assert meta["/tmp/test.md"] == "abc123"
+
 
 # ---------------------------------------------------------------------------
 # Global singleton

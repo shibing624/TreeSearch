@@ -91,42 +91,38 @@ class TestBuildParser:
 
 
 class TestLoadDocuments:
-    def test_loads_json_files(self):
+    def test_loads_from_db(self):
+        from treesearch.fts import FTS5Index
         with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "index.db")
+            fts = FTS5Index(db_path=db_path)
             for name in ["doc_a", "doc_b"]:
-                data = {
-                    "doc_name": name,
-                    "structure": [{"title": f"{name} root", "node_id": "0"}],
-                    "doc_description": f"Description of {name}",
-                }
-                with open(os.path.join(tmpdir, f"{name}.json"), "w") as f:
-                    json.dump(data, f)
+                from treesearch.tree import Document
+                doc = Document(
+                    doc_id=name,
+                    doc_name=name,
+                    structure=[{"title": f"{name} root", "node_id": "0"}],
+                    doc_description=f"Description of {name}",
+                )
+                fts.save_document(doc)
+            fts.close()
 
             docs = _load_documents_from_dir(tmpdir)
             assert len(docs) == 2
-            assert docs[0].doc_name == "doc_a"
-            assert docs[1].doc_name == "doc_b"
-            assert docs[0].doc_description == "Description of doc_a"
+            names = {d.doc_name for d in docs}
+            assert "doc_a" in names
+            assert "doc_b" in names
 
-    def test_skips_meta_files(self):
-        """_index_meta.json should be excluded from document loading."""
+    def test_empty_db_exits(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Normal doc
-            data = {
-                "doc_name": "doc_a",
-                "structure": [{"title": "root", "node_id": "0"}],
-            }
-            with open(os.path.join(tmpdir, "doc_a.json"), "w") as f:
-                json.dump(data, f)
-            # Meta file
-            with open(os.path.join(tmpdir, "_index_meta.json"), "w") as f:
-                json.dump({"some_file": "abc123"}, f)
+            db_path = os.path.join(tmpdir, "index.db")
+            from treesearch.fts import FTS5Index
+            fts = FTS5Index(db_path=db_path)
+            fts.close()
+            with pytest.raises(SystemExit):
+                _load_documents_from_dir(tmpdir)
 
-            docs = _load_documents_from_dir(tmpdir)
-            assert len(docs) == 1
-            assert docs[0].doc_name == "doc_a"
-
-    def test_empty_directory_exits(self):
+    def test_missing_db_exits(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with pytest.raises(SystemExit):
                 _load_documents_from_dir(tmpdir)
