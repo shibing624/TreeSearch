@@ -9,6 +9,7 @@ Falls back to regex if AST parsing fails (e.g. syntax errors).
 """
 import ast
 import logging
+import warnings
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,11 @@ def parse_python_structure(source: str) -> list[dict]:
         level 1 = class, level 2 = function/method
     """
     try:
-        tree = ast.parse(source)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source)
     except SyntaxError as e:
-        logger.warning("AST parse failed (syntax error at line %s), falling back to regex", e.lineno)
+        logger.debug("AST parse failed (syntax error at line %s), falling back to regex", e.lineno)
         return []
 
     headings = []

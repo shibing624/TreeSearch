@@ -41,6 +41,35 @@ _DEFAULT_WEIGHTS = {
     "front_matter": 2.0,
 }
 
+# ---------------------------------------------------------------------------
+# FTS5 availability detection
+# ---------------------------------------------------------------------------
+
+_FTS5_AVAILABLE: Optional[bool] = None
+
+
+def _check_fts5() -> bool:
+    """Check whether the current SQLite build includes the FTS5 extension."""
+    global _FTS5_AVAILABLE
+    if _FTS5_AVAILABLE is not None:
+        return _FTS5_AVAILABLE
+    try:
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE VIRTUAL TABLE _fts5_test USING fts5(x)")
+        conn.execute("DROP TABLE _fts5_test")
+        conn.close()
+        _FTS5_AVAILABLE = True
+    except sqlite3.OperationalError:
+        _FTS5_AVAILABLE = False
+        logger.warning(
+            "SQLite FTS5 extension is not available (SQLite version: %s). "
+            "Falling back to plain-text LIKE search. Performance and ranking "
+            "quality will be reduced. To fix: upgrade SQLite or install a "
+            "Python build that includes FTS5.",
+            sqlite3.sqlite_version,
+        )
+    return _FTS5_AVAILABLE
+
 
 # ---------------------------------------------------------------------------
 # Markdown structure parser
@@ -118,8 +147,9 @@ def _tokenize_for_fts(text: str) -> str:
 # FTS5 operators that should NOT be tokenized
 _FTS5_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
 
-# Characters that have special meaning in FTS5 query syntax
-_RE_FTS5_SPECIAL = re.compile(r'[?*"()\^{}]')
+# Characters that should be stripped from FTS5 query tokens.
+# Keep only word characters (letters, digits, underscore) and CJK ranges.
+_RE_FTS5_SPECIAL = re.compile(r'[^\w\u4e00-\u9fff\u3400-\u4dbf]')
 
 
 def _tokenize_fts_expression(expr: str) -> str:
@@ -175,13 +205,15 @@ class FTS5Index:
         self._init_db()
 
     def _init_db(self) -> None:
-        """Initialize SQLite database with FTS5 virtual table."""
+        """Initialize SQLite database with FTS5 virtual table (or fallback plain table)."""
         if self._db_path != ":memory:":
             os.makedirs(os.path.dirname(os.path.abspath(self._db_path)), exist_ok=True)
 
         self._conn = sqlite3.connect(self._db_path)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+
+        self._use_fts5 = _check_fts5()
 
         # Metadata table for nodes (structured fields for filtering)
         self._conn.execute("""
@@ -199,21 +231,39 @@ class FTS5Index:
             )
         """)
 
-        # FTS5 virtual table with content sync
-        # tokenize='unicode61' handles basic multi-language, but we pre-tokenize
-        # Chinese text with jieba and store space-separated tokens
-        self._conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS fts_nodes USING fts5(
-                node_id UNINDEXED,
-                doc_id UNINDEXED,
-                title,
-                summary,
-                body,
-                code_blocks,
-                front_matter,
-                tokenize='unicode61 remove_diacritics 2'
+        if self._use_fts5:
+            # FTS5 virtual table with content sync
+            # tokenize='unicode61' handles basic multi-language, but we pre-tokenize
+            # Chinese text with jieba and store space-separated tokens
+            self._conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS fts_nodes USING fts5(
+                    node_id UNINDEXED,
+                    doc_id UNINDEXED,
+                    title,
+                    summary,
+                    body,
+                    code_blocks,
+                    front_matter,
+                    tokenize='unicode61 remove_diacritics 2'
+                )
+            """)
+        else:
+            # Fallback: plain table with same columns for LIKE-based search
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS fts_nodes (
+                    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_id TEXT NOT NULL,
+                    doc_id TEXT NOT NULL,
+                    title TEXT DEFAULT '',
+                    summary TEXT DEFAULT '',
+                    body TEXT DEFAULT '',
+                    code_blocks TEXT DEFAULT '',
+                    front_matter TEXT DEFAULT ''
+                )
+            """)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_fts_nodes_doc_id ON fts_nodes (doc_id)"
             )
-        """)
 
         # Document metadata table (also stores tree structure for persistence)
         self._conn.execute("""
@@ -291,16 +341,19 @@ class FTS5Index:
                 return 0
 
         # Clear old entries for this document
-        # FTS5 UNINDEXED columns can't be indexed, so use rowid-based delete for performance
-        old_rowids = self._conn.execute(
-            "SELECT rowid FROM fts_nodes WHERE doc_id = ?", (document.doc_id,)
-        ).fetchall()
-        if old_rowids:
-            placeholders = ",".join("?" for _ in old_rowids)
-            self._conn.execute(
-                f"DELETE FROM fts_nodes WHERE rowid IN ({placeholders})",
-                [r[0] for r in old_rowids],
-            )
+        if self._use_fts5:
+            # FTS5 UNINDEXED columns can't be indexed, so use rowid-based delete
+            old_rowids = self._conn.execute(
+                "SELECT rowid FROM fts_nodes WHERE doc_id = ?", (document.doc_id,)
+            ).fetchall()
+            if old_rowids:
+                placeholders = ",".join("?" for _ in old_rowids)
+                self._conn.execute(
+                    f"DELETE FROM fts_nodes WHERE rowid IN ({placeholders})",
+                    [r[0] for r in old_rowids],
+                )
+        else:
+            self._conn.execute("DELETE FROM fts_nodes WHERE doc_id = ?", (document.doc_id,))
         self._conn.execute("DELETE FROM nodes WHERE doc_id = ?", (document.doc_id,))
 
         # Flatten tree and index each node
@@ -406,7 +459,7 @@ class FTS5Index:
         top_k: int = 20,
         fts_expression: Optional[str] = None,
     ) -> list[dict]:
-        """Search nodes using FTS5 BM25 ranking.
+        """Search nodes using FTS5 BM25 ranking (or LIKE fallback).
 
         Args:
             query: natural language query (will be tokenized)
@@ -418,6 +471,9 @@ class FTS5Index:
         Returns:
             list of {node_id, doc_id, title, summary, fts_score, depth}
         """
+        if not self._use_fts5:
+            return self._search_like(query, doc_id=doc_id, top_k=top_k)
+
         if fts_expression:
             # Tokenize terms in the expression while preserving FTS5 operators
             match_expr = _tokenize_fts_expression(fts_expression)
@@ -524,6 +580,72 @@ class FTS5Index:
             results.sort(key=lambda x: -x["fts_score"])
 
         return results
+
+    def _search_like(
+        self,
+        query: str,
+        doc_id: Optional[str] = None,
+        top_k: int = 20,
+    ) -> list[dict]:
+        """Fallback search using LIKE when FTS5 is unavailable.
+
+        Splits query into keywords and scores nodes by weighted keyword hits
+        across (title, summary, body, code_blocks, front_matter).
+        """
+        tokens = _tokenize_for_fts(query)
+        if not tokens.strip():
+            return []
+        keywords = [kw.strip().lower() for kw in tokens.split() if kw.strip()]
+        if not keywords:
+            return []
+
+        w = self._weights
+
+        if doc_id:
+            rows = self._conn.execute(
+                """SELECT node_id, doc_id, title, summary, body, code_blocks, front_matter
+                   FROM fts_nodes WHERE doc_id = ?""",
+                (doc_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT node_id, doc_id, title, summary, body, code_blocks, front_matter FROM fts_nodes"
+            ).fetchall()
+
+        scored: list[tuple[float, dict]] = []
+        for row in rows:
+            nid, did, title, summary, body, code_blocks, front_matter = row
+            score = 0.0
+            fields = [
+                (title or "", w["title"]),
+                (summary or "", w["summary"]),
+                (body or "", w["body"]),
+                (code_blocks or "", w["code_blocks"]),
+                (front_matter or "", w["front_matter"]),
+            ]
+            for kw in keywords:
+                for text, weight in fields:
+                    if kw in text.lower():
+                        score += weight
+            if score > 0:
+                depth_row = self._conn.execute(
+                    "SELECT depth FROM nodes WHERE doc_id = ? AND node_id = ?", (did, nid)
+                ).fetchone()
+                depth = depth_row[0] if depth_row else 0
+                meta_row = self._conn.execute(
+                    "SELECT title, summary FROM nodes WHERE doc_id = ? AND node_id = ?", (did, nid)
+                ).fetchone()
+                scored.append((score, {
+                    "node_id": nid,
+                    "doc_id": did,
+                    "title": meta_row[0] if meta_row else title,
+                    "summary": meta_row[1] if meta_row else summary,
+                    "depth": depth,
+                    "fts_score": round(score, 6),
+                }))
+
+        scored.sort(key=lambda x: -x[0])
+        return [item[1] for item in scored[:top_k]]
 
     def search_with_aggregation(
         self,
@@ -716,16 +838,18 @@ class FTS5Index:
 
     def remove_document(self, doc_id: str) -> None:
         """Remove a document and all its indexed nodes from the DB."""
-        # FTS5 UNINDEXED columns can't be indexed, so use rowid-based delete for performance
-        old_rowids = self._conn.execute(
-            "SELECT rowid FROM fts_nodes WHERE doc_id = ?", (doc_id,)
-        ).fetchall()
-        if old_rowids:
-            placeholders = ",".join("?" for _ in old_rowids)
-            self._conn.execute(
-                f"DELETE FROM fts_nodes WHERE rowid IN ({placeholders})",
-                [r[0] for r in old_rowids],
-            )
+        if self._use_fts5:
+            old_rowids = self._conn.execute(
+                "SELECT rowid FROM fts_nodes WHERE doc_id = ?", (doc_id,)
+            ).fetchall()
+            if old_rowids:
+                placeholders = ",".join("?" for _ in old_rowids)
+                self._conn.execute(
+                    f"DELETE FROM fts_nodes WHERE rowid IN ({placeholders})",
+                    [r[0] for r in old_rowids],
+                )
+        else:
+            self._conn.execute("DELETE FROM fts_nodes WHERE doc_id = ?", (doc_id,))
         self._conn.execute("DELETE FROM nodes WHERE doc_id = ?", (doc_id,))
         self._conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
         self._conn.commit()
@@ -809,8 +933,7 @@ class FTS5Index:
         # Escape FTS5 special characters in keywords
         safe_kws = []
         for kw in keywords:
-            # Remove FTS5 operators that could break syntax
-            cleaned = re.sub(r'["\(\)\*]', '', kw.strip())
+            cleaned = _RE_FTS5_SPECIAL.sub("", kw.strip())
             if cleaned:
                 # Tokenize for CJK
                 tokenized = _tokenize_for_fts(cleaned)
@@ -839,6 +962,9 @@ class FTS5Index:
 
     def optimize(self) -> None:
         """Run FTS5 merge optimization for better query performance."""
+        if not self._use_fts5:
+            logger.debug("FTS5 not available, skipping optimize")
+            return
         try:
             self._conn.execute("INSERT INTO fts_nodes(fts_nodes) VALUES('optimize')")
             self._conn.commit()
@@ -848,6 +974,9 @@ class FTS5Index:
 
     def rebuild(self) -> None:
         """Rebuild FTS5 index from scratch."""
+        if not self._use_fts5:
+            logger.debug("FTS5 not available, skipping rebuild")
+            return
         try:
             self._conn.execute("INSERT INTO fts_nodes(fts_nodes) VALUES('rebuild')")
             self._conn.commit()

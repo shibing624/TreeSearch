@@ -72,11 +72,11 @@ class TreeSearch:
         if db_path and not self.config.fts_db_path:
             self.config.fts_db_path = db_path
 
-    def _has_changed_files(self) -> bool:
-        """Quick check: are any pending source files newer than what's stored in the DB?
+    def _get_changed_files(self) -> List[str]:
+        """Return list of pending source files that changed since last index.
 
         Uses (mtime_ns, size) fingerprints stored in index_meta.
-        Returns True if any file changed or is missing from DB metadata.
+        Returns only the files whose fingerprint differs from the stored value.
         """
         from .fts import FTS5Index
         from .indexer import _file_hash
@@ -85,6 +85,7 @@ class TreeSearch:
         stored_meta = fts.get_all_index_meta()
         fts.close()
 
+        changed = []
         for p in self._pending_paths:
             if "*" in p or "?" in p:
                 files = glob.glob(p, recursive=True)
@@ -93,8 +94,8 @@ class TreeSearch:
             for fp in files:
                 current_hash = _file_hash(fp)
                 if stored_meta.get(fp) != current_hash:
-                    return True
-        return False
+                    changed.append(fp)
+        return changed
 
     # ------------------------------------------------------------------
     # Index
@@ -172,14 +173,21 @@ class TreeSearch:
             dict with 'documents', 'query', and 'llm_calls'.
         """
         if not self.documents and self._pending_paths:
-            # Fast path: if DB already has documents and no files changed,
-            # skip the full build_index pipeline (avoids N file hashes + DB queries)
             if os.path.isfile(self.db_path):
                 cached_docs = load_documents(self.db_path)
-                if cached_docs and not self._has_changed_files():
-                    self.documents = cached_docs
-                    self._pending_paths.clear()
-            # Slow path: need to build or rebuild index
+                if cached_docs:
+                    changed = self._get_changed_files()
+                    if not changed:
+                        # No files changed — use cached documents directly
+                        self.documents = cached_docs
+                        self._pending_paths.clear()
+                    else:
+                        # Only re-index changed files, then load all from DB
+                        logger.info("Incremental re-index: %d file(s) changed", len(changed))
+                        await self.aindex(*changed)
+                        self.documents = load_documents(self.db_path)
+                        self._pending_paths.clear()
+            # First-time index: no DB exists yet
             if not self.documents and self._pending_paths:
                 await self.aindex(*self._pending_paths)
                 self._pending_paths.clear()
@@ -238,6 +246,59 @@ class TreeSearch:
             pass
 
         return asyncio.run(self.asearch(query, **kwargs))
+
+    # ------------------------------------------------------------------
+    # File listing
+    # ------------------------------------------------------------------
+
+    def resolve_glob_files(self, *paths: str) -> List[str]:
+        """Resolve glob patterns and return the list of matched file paths.
+
+        If no paths are given, resolves the pending paths passed to the constructor.
+
+        Args:
+            *paths: File paths or glob patterns (e.g. 'docs/**/*.md', 'src/*.py').
+                    Supports recursive ``**`` patterns.
+
+        Returns:
+            Sorted list of resolved absolute file paths.
+        """
+        targets = list(paths) if paths else self._pending_paths
+        resolved = []
+        for p in targets:
+            if "*" in p or "?" in p:
+                resolved.extend(glob.glob(p, recursive=True))
+            else:
+                if os.path.isfile(p):
+                    resolved.append(p)
+        # Deduplicate and sort
+        return sorted(set(os.path.abspath(f) for f in resolved))
+
+    def get_indexed_files(self) -> List[dict]:
+        """Return information about all files that have been indexed in the database.
+
+        Each item contains:
+            - source_path: absolute path of the source file
+            - doc_id: document identifier in the index
+            - doc_name: document name
+            - source_type: file type (e.g. 'markdown', 'code', 'text')
+
+        Returns:
+            List of dicts with indexed file information, sorted by source_path.
+        """
+        if not os.path.isfile(self.db_path):
+            return []
+
+        docs = load_documents(self.db_path)
+        result = []
+        for doc in docs:
+            result.append({
+                "source_path": doc.metadata.get("source_path", ""),
+                "doc_id": doc.doc_id,
+                "doc_name": doc.doc_name,
+                "source_type": doc.source_type,
+            })
+        return sorted(result, key=lambda x: x["source_path"])
 
     # ------------------------------------------------------------------
     # Save / Load indexes

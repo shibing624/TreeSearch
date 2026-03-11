@@ -1100,8 +1100,10 @@ async def build_index(
                 continue
         documents.append(doc)
 
-    # Batch update metadata (single transaction)
-    fts.set_index_meta_batch(file_hashes)
+    # Batch update metadata only for changed files (single transaction)
+    changed_hashes = {fp: file_hashes[fp] for fp in to_index if fp in file_hashes}
+    if changed_hashes:
+        fts.set_index_meta_batch(changed_hashes)
 
     fts.close()
     return documents
