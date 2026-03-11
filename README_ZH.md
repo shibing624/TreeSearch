@@ -323,7 +323,7 @@ python examples/benchmark/codesearchnet_benchmark.py --max-samples 50 --max-corp
 ## 社区与支持
 
 - **GitHub Issues** — [提交 issue](https://github.com/shibing624/TreeSearch/issues)
-- **微信群** — 添加微信号 `xuming624`，备注 "llm"，加入技术交流群
+- **微信群** — 添加微信号 `xuming624`，备注 "nlp"，加入技术交流群
 
 <img src="https://github.com/shibing624/TreeSearch/blob/main/docs/wechat.jpeg" width="200" />
 

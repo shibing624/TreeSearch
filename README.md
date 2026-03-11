@@ -311,7 +311,7 @@ python examples/benchmark/codesearchnet_benchmark.py --max-samples 50 --max-corp
 ## Community
 
 - **GitHub Issues** — [Submit an issue](https://github.com/shibing624/TreeSearch/issues)
-- **WeChat Group** — Add WeChat ID `xuming624`, note "llm", to join the tech group
+- **WeChat Group** — Add WeChat ID `xuming624`, note "nlp", to join the tech group
 
 <img src="https://github.com/shibing624/TreeSearch/blob/main/docs/wechat.jpeg" width="200" />
 
