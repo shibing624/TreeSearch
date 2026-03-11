@@ -49,10 +49,10 @@ TreeSearch takes a fundamentally different approach — parse documents into **t
 | | Traditional RAG | TreeSearch |
 |---|---|---|
 | **Preprocessing** | Chunk splitting + embedding | Parse headings → build tree |
-| **Retrieval** | Vector similarity search | FTS5/BM25 pre-scoring + LLM tree search |
-| **Multi-doc** | Needs vector DB for routing | LLM routes by document descriptions |
+| **Retrieval** | Vector similarity search | FTS5/BM25 keyword matching (default, no LLM); optional LLM tree search |
+| **Multi-doc** | Needs vector DB for routing | FTS5 cross-doc scoring (default); optional LLM routing by doc descriptions |
 | **Structure** | Lost after chunking | Fully preserved as tree hierarchy |
-| **Dependencies** | Vector DB + embedding model | SQLite only (LLM optional, no embedding, no vector DB) |
+| **Dependencies** | Vector DB + embedding model | SQLite only (no embedding, no vector DB, LLM optional) |
 
 ### Key Advantages
 
