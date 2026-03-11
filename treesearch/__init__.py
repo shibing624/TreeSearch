@@ -3,7 +3,7 @@
 @author:XuMing(xuming624@qq.com)
 @description: TreeSearch - Structure-aware document retrieval via tree-structured indexing.
 
-No vector embeddings. No chunk splitting. FTS5/BM25 keyword matching over document trees.
+No vector embeddings. No chunk splitting. FTS5 keyword matching over document trees.
 
 Quick Start::
 
@@ -47,64 +47,40 @@ if not _ensure_fts5_support():
             stacklevel=2,
         )
 
-# -- Primary API: TreeSearch is the only class most users need --
+# ============================================================================
+# Public API
+# ============================================================================
+
+# -- Primary: the only class most users need --
 from treesearch.treesearch import TreeSearch
 
-# -- Advanced / Power-user API --
-# Index & Document
-from treesearch.tree import Document, load_index, load_documents, save_index
-
-# Search
-from treesearch.search import search, search_sync, PreFilter, GrepFilter
-
-# Configuration
+# -- Core --
+from treesearch.indexer import build_index, md_to_tree, text_to_tree
+from treesearch.search import search, search_sync, GrepFilter
+from treesearch.tree import Document, load_index, load_documents, save_index, flatten_tree, print_toc
 from treesearch.config import TreeSearchConfig, get_config, set_config, reset_config
-
-# FTS5
-from treesearch.fts import FTS5Index, get_fts_index, set_fts_index, reset_fts_index
-
-# Tokenizer & utilities
-from treesearch.tokenizer import tokenize
-from treesearch.utils import count_tokens
-
-# Tree utilities
-from treesearch.tree import (
-    INDEX_VERSION,
-    assign_node_ids,
-    build_tree_maps,
-    flatten_tree,
-    find_node,
-    get_leaf_nodes,
-    remove_fields,
-    format_structure,
-    print_toc,
-    print_tree_json,
-)
-
-# Indexer functions
-from treesearch.indexer import build_index, md_to_tree, text_to_tree, code_to_tree, json_to_tree, csv_to_tree
-
-# Parser registry
-from treesearch.parsers import ParserRegistry, get_parser
+from treesearch.fts import FTS5Index
 
 __all__ = [
-    # Primary API
+    # Primary
     "TreeSearch",
-    # Indexer
-    "build_index", "md_to_tree", "text_to_tree", "code_to_tree", "json_to_tree", "csv_to_tree",
-    # Document
-    "Document", "load_index", "load_documents", "save_index",
+    # Indexing
+    "build_index", "md_to_tree", "text_to_tree",
     # Search
-    "search", "search_sync", "PreFilter", "GrepFilter",
+    "search", "search_sync", "GrepFilter",
+    # Document & tree
+    "Document", "load_index", "load_documents", "save_index", "flatten_tree", "print_toc",
     # Config
     "TreeSearchConfig", "get_config", "set_config", "reset_config",
     # FTS5
-    "FTS5Index", "get_fts_index", "set_fts_index", "reset_fts_index",
-    # Tokenizer & utilities
-    "tokenize", "count_tokens",
-    # Tree utilities
-    "INDEX_VERSION", "assign_node_ids", "build_tree_maps", "flatten_tree", "find_node",
-    "get_leaf_nodes", "remove_fields", "format_structure", "print_toc", "print_tree_json",
-    # Parser registry
-    "ParserRegistry", "get_parser",
+    "FTS5Index",
 ]
+
+# Advanced APIs — import from submodules directly:
+#   from treesearch.indexer import code_to_tree, json_to_tree, csv_to_tree
+#   from treesearch.search import PreFilter
+#   from treesearch.fts import get_fts_index, set_fts_index, reset_fts_index
+#   from treesearch.tokenizer import tokenize
+#   from treesearch.utils import count_tokens
+#   from treesearch.tree import assign_node_ids, find_node, get_leaf_nodes, ...
+#   from treesearch.parsers import ParserRegistry, get_parser
