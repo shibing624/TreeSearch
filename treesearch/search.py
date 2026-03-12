@@ -219,7 +219,9 @@ async def search(
         max_nodes_per_doc = cfg.max_nodes_per_doc
 
     # Stage 1: document routing (FTS5-based)
-    if len(documents) <= 1:
+    if not cfg.fts_enabled:
+        selected = documents
+    elif len(documents) <= 1:
         selected = documents
     else:
         from .fts import get_fts_index
@@ -241,21 +243,24 @@ async def search(
     # Stage 1.5: Pre-filter scoring
     scorer = pre_filter
     if scorer is None and selected:
-        # Check if any selected document recommends grep pre-filter
-        from .parsers import get_prefilters_for_source_type
-        use_grep = False
-        for doc in selected:
-            prefilters = get_prefilters_for_source_type(doc.source_type or "text")
-            if "grep" in prefilters:
-                use_grep = True
-                break
-
-        if use_grep:
-            grep_filter = GrepFilter(selected)
-            fts_index = _get_fts_scorer(selected, cfg)
-            scorer = _CombinedScorer(grep_filter, fts_index) if fts_index else grep_filter
+        if not cfg.fts_enabled:
+            scorer = GrepFilter(selected)
         else:
-            scorer = _get_fts_scorer(selected, cfg)
+            # Check if any selected document recommends grep pre-filter
+            from .parsers import get_prefilters_for_source_type
+            use_grep = False
+            for doc in selected:
+                prefilters = get_prefilters_for_source_type(doc.source_type or "text")
+                if "grep" in prefilters:
+                    use_grep = True
+                    break
+
+            if use_grep:
+                grep_filter = GrepFilter(selected)
+                fts_index = _get_fts_scorer(selected, cfg)
+                scorer = _CombinedScorer(grep_filter, fts_index) if fts_index else grep_filter
+            else:
+                scorer = _get_fts_scorer(selected, cfg)
 
     # Stage 2: tree search within each document (concurrent)
     async def _search_doc(doc: Document) -> dict:
