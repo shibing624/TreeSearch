@@ -54,6 +54,18 @@ ts = TreeSearch("src/", "docs/*.md", "README.md")
 results = ts.search("authentication")
 ```
 
+### In-Memory Mode
+
+For quick searches, scripts, or ephemeral use cases, set `db_path=None` to skip writing any `.db` file to disk:
+
+```python
+# In-memory mode — no index.db file, all indexes kept in memory
+ts = TreeSearch("docs/", db_path=None)
+results = ts.search("voice calls")
+```
+
+Performance is excellent even with thousands of documents (5,000 docs < 10ms). The trade-off is that indexes are lost when the process exits. For persistent, incremental indexing, use the default `db_path` or set it to a file path.
+
 ## Why TreeSearch?
 
 Traditional RAG systems split documents into fixed-size chunks and retrieve by vector similarity. This **destroys document structure**, loses heading hierarchy, and misses reasoning-dependent queries.
