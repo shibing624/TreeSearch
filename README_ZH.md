@@ -109,7 +109,7 @@ TreeSearch：
 - **Ripgrep 加速 GrepFilter** — 自动调用系统 `rg` 进行快速行级匹配，未安装时透明降级为纯 Python；基于命中次数的评分让多次命中的节点排名更高
 - **解析器注册表** — 可扩展的 `ParserRegistry`，内置解析器自动注册；支持 `ParserRegistry.register()` 注册自定义解析器
 - **Python AST 解析** — `ast` 模块提取类/函数的完整签名（参数、返回值类型）；语法错误时回退正则
-- **PDF/DOCX/HTML 解析器** — 可选解析器，通过 `pageindex`、`python-docx`、`beautifulsoup4` 实现（`pip install pytreesearch[all]`）
+- **PDF/DOCX/HTML 解析器** — 可选解析器，通过 `PyPDF2`、`python-docx`、`beautifulsoup4` 实现（`pip install pytreesearch[all]`）
 - **GrepFilter 精准匹配** — 支持字面量/正则表达式匹配，精准定位代码符号和关键词
 - **Source-type 路由** — 根据文件类型自动选择预过滤器（如代码文件使用 GrepFilter + FTS5）
 - **中英文支持** — 内置 jieba 中文分词和英文正则分词

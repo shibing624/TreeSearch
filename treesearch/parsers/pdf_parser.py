@@ -33,17 +33,23 @@ async def pdf_to_tree(
         {'doc_name': str, 'structure': list, 'source_path': str}
     """
     try:
-        from pageindex import PageIndex
+        import PyPDF2
     except ImportError:
         raise ImportError(
-            "PDF support requires 'pageindex'. Install with: pip install pageindex"
+            "PDF support requires 'PyPDF2'. Install with: pip install PyPDF2"
         )
 
     doc_name = os.path.splitext(os.path.basename(pdf_path))[0]
     logger.info("Extracting text from PDF: %s", pdf_path)
 
-    pi = PageIndex(pdf_path)
-    text = pi.get_text()
+    try:
+        pdf_reader = PyPDF2.PdfReader(pdf_path)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() or ""
+    except Exception as e:
+        logger.error("Error extracting text from PDF %s: %s", pdf_path, e)
+        text = ""
 
     if not text or not text.strip():
         logger.warning("No text extracted from PDF: %s", pdf_path)

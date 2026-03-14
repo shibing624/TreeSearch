@@ -97,7 +97,7 @@ TreeSearch takes a fundamentally different approach — parse documents into **t
 - **Ripgrep-accelerated GrepFilter** — Auto-uses system `rg` for fast line-level matching with transparent native Python fallback; hit-count-based scoring ranks multi-match nodes higher
 - **Parser registry** — Extensible `ParserRegistry` with built-in parsers auto-registered; custom parsers via `ParserRegistry.register()`
 - **Python AST parsing** — `ast` module extracts classes/functions with full signatures (parameters, return types); regex fallback for syntax errors
-- **PDF/DOCX/HTML parsers** — Optional parsers via `pageindex`, `python-docx`, `beautifulsoup4` (install with `pip install pytreesearch[all]`)
+- **PDF/DOCX/HTML parsers** — Optional parsers via `PyPDF2`, `python-docx`, `beautifulsoup4` (install with `pip install pytreesearch[all]`)
 - **GrepFilter** — Exact literal/regex matching for precise symbol and keyword search across tree nodes
 - **Source-type routing** — Automatic pre-filter selection based on file type (e.g., code files use GrepFilter + FTS5)
 - **Chinese + English** — Built-in jieba tokenization for Chinese and regex tokenization for English
