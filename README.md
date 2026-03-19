@@ -278,7 +278,6 @@ result = await search("How to request GPU machines", docs)
 | Solution | Pros | Cons | Best For |
 |----------|------|------|----------|
 | **Ctrl+F** | Simple | No semantic understanding, fragmented results | Known keywords |
-| **Traditional RAG** | Good semantic understanding | Chunking destroys context, slow response | Plain text QA |
 | **Vector DB** | Similarity search | Requires embedding preprocessing, high cost | Large-scale semantic retrieval |
 | **TreeSearch** | Preserves structure + Fast + Zero cost | Requires structured documents | Tech docs/Codebase |
 
