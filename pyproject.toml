@@ -26,18 +26,20 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Text Processing :: Indexing",
 ]
-dependencies = []
+dependencies = [
+    "tqdm>=4.42",
+    "jieba>=0.42",
+    "pathspec>=0.11",
+]
 
 [project.optional-dependencies]
-jieba = ["jieba>=0.42"]
 pdf = ["pymupdf>=1.24"]
 docx = ["python-docx>=0.8"]
 excel = ["openpyxl>=3.1"]
 html = ["beautifulsoup4>=4.12"]
 fts5 = ["pysqlite3-binary>=0.5"]
 treesitter = ["tree-sitter-languages>=1.10"]
-gitignore = ["pathspec>=0.11"]
-all = ["jieba>=0.42", "pymupdf>=1.24", "python-docx>=0.8", "openpyxl>=3.1", "beautifulsoup4>=4.12", "tree-sitter-languages>=1.10", "pathspec>=0.11"]
+all = ["pymupdf>=1.24", "python-docx>=0.8", "openpyxl>=3.1", "beautifulsoup4>=4.12", "tree-sitter-languages>=1.10"]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",

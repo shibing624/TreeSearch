@@ -84,7 +84,7 @@ async def html_to_tree(
         {'doc_name': str, 'structure': list, 'source_path': str}
     """
     doc_name = os.path.splitext(os.path.basename(html_path))[0]
-    logger.info("Parsing HTML: %s", html_path)
+    logger.debug("Parsing HTML: %s", html_path)
 
     with open(html_path, "r", encoding="utf-8", errors="replace") as f:
         html_content = f.read()

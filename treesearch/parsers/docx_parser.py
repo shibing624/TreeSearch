@@ -73,7 +73,7 @@ async def docx_to_tree(
         {'doc_name': str, 'structure': list, 'source_path': str}
     """
     doc_name = os.path.splitext(os.path.basename(docx_path))[0]
-    logger.info("Parsing DOCX: %s", docx_path)
+    logger.debug("Parsing DOCX: %s", docx_path)
 
     headings, lines = _extract_docx_headings(docx_path)
 

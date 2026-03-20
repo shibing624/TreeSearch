@@ -100,7 +100,7 @@ async def pdf_to_tree(
 
     _check_backends()
     doc_name = os.path.splitext(os.path.basename(fp))[0]
-    logger.info("Parsing document: %s", fp)
+    logger.debug("Parsing document: %s", fp)
 
     # Extract text with [PAGE N] markers
     text = extract_pdf_text(fp)

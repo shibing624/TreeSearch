@@ -15,6 +15,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from tqdm import tqdm
+
 from .tree import (
     Document, assign_node_ids, flatten_tree, format_structure, remove_fields,
 )
@@ -113,7 +115,7 @@ def _finalize_tree(
     tree = format_structure(tree, order=order)
 
     if if_add_node_summary:
-        logger.info("Generating summaries...")
+        logger.debug("Generating summaries...")
         tree = generate_summaries(tree, threshold=summary_chars_threshold)
         if not if_add_node_text:
             order_no_text = [f for f in order if f != "text"]
@@ -126,7 +128,7 @@ def _finalize_tree(
         result["source_type"] = source_type
 
     if if_add_doc_description:
-        logger.info("Generating document description...")
+        logger.debug("Generating document description...")
         result["doc_description"] = generate_doc_description(tree)
 
     return result
@@ -277,16 +279,16 @@ async def md_to_tree(
     else:
         doc_name = "untitled"
 
-    logger.info("Extracting headings from markdown...")
+    logger.debug("Extracting headings from markdown...")
     markers, lines = _extract_md_headings(md_content)
     nodes = _cut_md_text(markers, lines)
 
     if if_thinning and min_thinning_chars:
         nodes = _update_char_counts(nodes)
-        logger.info("Thinning tree (threshold=%d chars)...", min_thinning_chars)
+        logger.debug("Thinning tree (threshold=%d chars)...", min_thinning_chars)
         nodes = _thin_tree(nodes, min_thinning_chars)
 
-    logger.info("Building tree from %d nodes...", len(nodes))
+    logger.debug("Building tree from %d nodes...", len(nodes))
     tree = _build_tree(nodes)
 
     return _finalize_tree(
@@ -448,12 +450,12 @@ async def text_to_tree(
 
     text = _preprocess_text(raw)
     lines = text.split("\n")
-    logger.info("Text loaded: %d lines", len(lines))
+    logger.debug("Text loaded: %d lines", len(lines))
 
     # Step 1: heading detection (pure rule-based)
     headings = _detect_headings(lines)
     markers = [{"title": h["title"], "line_num": h["line_num"], "level": h["level"]} for h in headings]
-    logger.info("Rule-based detection: %d headings", len(markers))
+    logger.debug("Rule-based detection: %d headings", len(markers))
 
     # Fallback: single root node if no headings detected
     if not markers:
@@ -465,11 +467,11 @@ async def text_to_tree(
     # Step 3: thinning
     if if_thinning and min_thinning_chars:
         nodes = _update_char_counts(nodes)
-        logger.info("Thinning tree (threshold=%d chars)...", min_thinning_chars)
+        logger.debug("Thinning tree (threshold=%d chars)...", min_thinning_chars)
         nodes = _thin_tree(nodes, min_thinning_chars)
 
     # Step 4: build tree
-    logger.info("Building tree from %d nodes...", len(nodes))
+    logger.debug("Building tree from %d nodes...", len(nodes))
     tree = _build_tree(nodes)
 
     return _finalize_tree(
@@ -578,11 +580,11 @@ async def code_to_tree(
 
     text = raw.replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
-    logger.info("Code loaded: %d lines", len(lines))
+    logger.debug("Code loaded: %d lines", len(lines))
 
     headings = _detect_code_headings(lines, ext, source=text)
     markers = [{"title": h["title"], "line_num": h["line_num"], "level": h["level"]} for h in headings]
-    logger.info("Code structure detection: %d methods/classes", len(markers))
+    logger.debug("Code structure detection: %d methods/classes", len(markers))
 
     if not markers:
         markers = [{"title": doc_name, "line_num": 1, "level": 1}]
@@ -591,10 +593,10 @@ async def code_to_tree(
 
     if if_thinning and min_thinning_chars:
         nodes = _update_char_counts(nodes)
-        logger.info("Thinning tree (threshold=%d chars)...", min_thinning_chars)
+        logger.debug("Thinning tree (threshold=%d chars)...", min_thinning_chars)
         nodes = _thin_tree(nodes, min_thinning_chars)
 
-    logger.info("Building tree from %d nodes...", len(nodes))
+    logger.debug("Building tree from %d nodes...", len(nodes))
     tree = _build_tree(nodes)
 
     return _finalize_tree(
@@ -747,7 +749,7 @@ async def jsonl_to_tree(
                 logger.warning("Skipping invalid JSON at line %d in %s: %s", line_num, jsonl_path, e)
 
     doc_name = os.path.splitext(os.path.basename(jsonl_path))[0]
-    logger.info("JSONL loaded: %d records from %s", len(records), jsonl_path)
+    logger.debug("JSONL loaded: %d records from %s", len(records), jsonl_path)
 
     flat_nodes = _jsonl_to_nodes(records, key_field=key_field)
     if not flat_nodes:
@@ -1020,8 +1022,13 @@ async def build_index(
     _file_timings: dict[str, tuple[str, float]] = {}  # fp -> (source_type, elapsed_s)
     _failed_paths: list[str] = []
 
+    # Progress bar for parsing stage
+    _parse_bar = tqdm(total=len(to_index), desc="Parsing", unit="file", dynamic_ncols=True)
+
     async def _index_one(fp: str) -> dict | None:
         async with semaphore:
+            fname = os.path.basename(fp)
+            _parse_bar.set_postfix_str(fname, refresh=False)
             t0 = time.monotonic()
             try:
                 ext = os.path.splitext(fp)[1].lower()
@@ -1052,8 +1059,11 @@ async def build_index(
                 _failed_paths.append(fp)
                 _file_timings[fp] = ("(failed)", time.monotonic() - t0)
                 return None
+            finally:
+                _parse_bar.update()
 
     raw_results = await asyncio.gather(*(_index_one(fp) for fp in to_index))
+    _parse_bar.close()
 
     # Save results to DB and collect Document objects
     result_map = {fp: r for fp, r in zip(to_index, raw_results) if r is not None}
@@ -1065,6 +1075,8 @@ async def build_index(
     else:
         all_docs_from_db = {}
 
+    # Progress bar for saving stage
+    _save_bar = tqdm(total=len(expanded), desc="Saving", unit="file", dynamic_ncols=True)
     for fp in expanded:
         name = os.path.splitext(os.path.basename(fp))[0]
         if fp in result_map:
@@ -1079,14 +1091,17 @@ async def build_index(
             )
             fts.save_document(doc)
             fts.index_document(doc, force=True)
-            logger.info("Indexed: %s -> %s (doc_id=%s)", fp, db_path, name)
+            logger.debug("Indexed: %s -> %s (doc_id=%s)", fp, db_path, name)
         else:
             # Skipped file: use batch-loaded docs
             doc = all_docs_from_db.get(name)
             if doc is None:
                 logger.warning("Skipped file %s but document not found in DB, re-indexing", fp)
+                _save_bar.update()
                 continue
         documents.append(doc)
+        _save_bar.update()
+    _save_bar.close()
 
     # Batch update metadata only for changed files (single transaction)
     changed_hashes = {os.path.abspath(fp): file_hashes[os.path.abspath(fp)] for fp in to_index if os.path.abspath(fp) in file_hashes}

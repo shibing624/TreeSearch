@@ -28,7 +28,7 @@ class TestTokenize:
         assert tokenize("   ") == []
 
     def test_chinese_text_auto(self):
-        """Default 'auto' mode: uses jieba if installed, else bigram."""
+        """Default 'auto' mode: uses jieba for CJK tokenization."""
         tokens = tokenize("这是一个测试文档")
         assert len(tokens) > 0
         assert any(len(t) >= 1 for t in tokens)

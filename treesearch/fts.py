@@ -449,7 +449,7 @@ class FTS5Index:
         )
 
         self._conn.commit()
-        logger.info("FTS5 indexed document %s: %d nodes", document.doc_id, count)
+        logger.debug("FTS5 indexed document %s: %d nodes", document.doc_id, count)
         return count
 
     def index_documents(self, documents: list, force: bool = False) -> int:

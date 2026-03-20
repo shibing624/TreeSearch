@@ -69,14 +69,7 @@ def _load_gitignore_spec(root: str):
     gitignore_path = _find_gitignore(root)
     if not gitignore_path:
         return None, root
-    try:
-        import pathspec
-    except ImportError:
-        logger.debug(
-            "pathspec not installed — .gitignore rules will be ignored. "
-            "Install with: pip install pathspec"
-        )
-        return None, root
+    import pathspec
     base_dir = os.path.dirname(gitignore_path)
     with open(gitignore_path, "r", encoding="utf-8", errors="replace") as f:
         return pathspec.PathSpec.from_lines("gitwildmatch", f), base_dir

@@ -376,7 +376,7 @@ async def treesitter_code_to_tree(
 
     if not headings:
         # Fallback to regex-based parser
-        logger.info("tree-sitter returned no results for %s, falling back to regex parser", code_path)
+        logger.debug("tree-sitter returned no results for %s, falling back to regex parser", code_path)
         return await code_to_tree(
             code_path=code_path,
             model=model,
@@ -389,7 +389,7 @@ async def treesitter_code_to_tree(
             if_add_node_id=if_add_node_id,
         )
 
-    logger.info("tree-sitter parsed %s: %d structures in %d lines", ext, len(headings), len(lines))
+    logger.debug("tree-sitter parsed %s: %d structures in %d lines", ext, len(headings), len(lines))
 
     markers = [{"title": h["title"], "line_num": h["line_num"], "level": h["level"]} for h in headings]
 
@@ -400,10 +400,10 @@ async def treesitter_code_to_tree(
 
     if if_thinning and min_thinning_chars:
         nodes = _update_char_counts(nodes)
-        logger.info("Thinning tree (threshold=%d chars)...", min_thinning_chars)
+        logger.debug("Thinning tree (threshold=%d chars)...", min_thinning_chars)
         nodes = _thin_tree(nodes, min_thinning_chars)
 
-    logger.info("Building tree from %d nodes...", len(nodes))
+    logger.debug("Building tree from %d nodes...", len(nodes))
     tree = _build_tree(nodes)
 
     if if_add_node_id:
@@ -417,7 +417,7 @@ async def treesitter_code_to_tree(
     tree = format_structure(tree, order=order)
 
     if if_add_node_summary:
-        logger.info("Generating summaries...")
+        logger.debug("Generating summaries...")
         tree = generate_summaries(tree, threshold=summary_chars_threshold)
         if not if_add_node_text:
             order_no_text = [f for f in order if f != "text"]
@@ -426,7 +426,7 @@ async def treesitter_code_to_tree(
     result = {"doc_name": doc_name, "structure": tree, "source_path": os.path.abspath(code_path)}
 
     if if_add_doc_description:
-        logger.info("Generating document description...")
+        logger.debug("Generating document description...")
         result["doc_description"] = generate_doc_description(tree)
 
     return result

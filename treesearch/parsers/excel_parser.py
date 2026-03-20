@@ -117,7 +117,7 @@ async def excel_to_tree(
         {'doc_name': str, 'structure': list, 'source_path': str}
     """
     doc_name = os.path.splitext(os.path.basename(excel_path))[0]
-    logger.info("Parsing Excel: %s", excel_path)
+    logger.debug("Parsing Excel: %s", excel_path)
 
     nodes = _extract_excel_data(excel_path)
 

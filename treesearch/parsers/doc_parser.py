@@ -103,7 +103,7 @@ def extract_doc_text(doc_path: str) -> str:
     ):
         text = extractor(doc_path)
         if text.strip():
-            logger.info("Extracted .doc text via %s: %d chars", extractor.__name__, len(text))
+            logger.debug("Extracted .doc text via %s: %d chars", extractor.__name__, len(text))
             return text
 
     logger.warning(
@@ -134,7 +134,7 @@ async def doc_to_tree(
         {'doc_name': str, 'structure': list, 'source_path': str}
     """
     doc_name = os.path.splitext(os.path.basename(doc_path))[0]
-    logger.info("Parsing DOC: %s", doc_path)
+    logger.debug("Parsing DOC: %s", doc_path)
 
     text = extract_doc_text(doc_path)
     if not text.strip():

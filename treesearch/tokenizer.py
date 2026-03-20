@@ -38,7 +38,7 @@ _EN_STOPWORDS = frozenset({
 })
 
 # ---------------------------------------------------------------------------
-# Lazy-loaded optional dependencies
+# Lazy-loaded heavy dependencies (import cost optimization)
 # ---------------------------------------------------------------------------
 
 _JIEBA_LOADED = False
@@ -47,15 +47,12 @@ _STEMMER = None
 
 
 def _ensure_jieba():
-    """Lazy-load jieba to avoid import cost when unused."""
+    """Lazy-load jieba to avoid ~1s import cost when unused (no CJK text)."""
     global _JIEBA_LOADED, _jieba
     if not _JIEBA_LOADED:
-        try:
-            import jieba
-            jieba.setLogLevel(logging.WARNING)
-            _jieba = jieba
-        except ImportError:
-            _jieba = None
+        import jieba
+        jieba.setLogLevel(logging.WARNING)
+        _jieba = jieba
         _JIEBA_LOADED = True
     return _jieba
 
@@ -79,11 +76,7 @@ def _ensure_stemmer():
 def _tokenize_cjk_jieba(text: str) -> list[str]:
     """Tokenize CJK text using jieba word segmentation."""
     jieba_mod = _ensure_jieba()
-    if jieba_mod is not None:
-        return list(jieba_mod.cut(text))
-    raise ImportError(
-        "jieba is not installed. Install it via: pip install jieba"
-    )
+    return list(jieba_mod.cut(text))
 
 
 def _tokenize_cjk_bigram(text: str) -> list[str]:
@@ -134,8 +127,8 @@ def tokenize(text: str, use_stemmer: bool = True, remove_stopwords: bool = True)
     """Tokenize text for indexing / search. Supports Chinese and English.
 
     CJK tokenization mode is determined by ``get_config().cjk_tokenizer``:
-      - ``"auto"``: jieba if installed, else bigram
-      - ``"jieba"``: force jieba (raises ImportError if missing)
+      - ``"auto"``: jieba word segmentation (default)
+      - ``"jieba"``: same as auto (explicit)
       - ``"bigram"``: CJK character 2-grams
       - ``"char"``: single-character splitting (legacy behaviour)
     """
@@ -154,12 +147,9 @@ def tokenize(text: str, use_stemmer: bool = True, remove_stopwords: bool = True)
         elif mode == "char":
             tokens = _tokenize_cjk_char(text)
         else:
-            # "auto": try jieba, fall back to bigram
+            # "auto": use jieba (always available as a required dependency)
             jieba_mod = _ensure_jieba()
-            if jieba_mod is not None:
-                tokens = list(jieba_mod.cut(text))
-            else:
-                tokens = _tokenize_cjk_bigram(text)
+            tokens = list(jieba_mod.cut(text))
     else:
         tokens = _RE_SPLIT_EN.split(text.lower())
 

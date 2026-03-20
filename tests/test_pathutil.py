@@ -100,16 +100,12 @@ class TestShouldIgnoreDir:
 
 
 class TestGitignoreSupport:
-    """Test .gitignore integration (requires pathspec)."""
+    """Test .gitignore integration."""
 
     def test_gitignore_respected(self, tmp_path):
         (tmp_path / ".gitignore").write_text("ignored.py\n")
         (tmp_path / "kept.py").write_text("x")
         (tmp_path / "ignored.py").write_text("y")
-        try:
-            import pathspec  # noqa: F401
-        except ImportError:
-            pytest.skip("pathspec not installed")
         result = resolve_paths(
             [str(tmp_path)],
             allowed_extensions={".py"},

@@ -306,7 +306,7 @@ async def search(
         else:
             selected = documents[:top_k_docs]
 
-    logger.info("Selected %d documents: %s", len(selected), [d.doc_name for d in selected])
+    logger.debug("Selected %d documents: %s", len(selected), [d.doc_name for d in selected])
 
     # Stage 1.5: Pre-filter scoring
     scorer = pre_filter
