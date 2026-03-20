@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pytreesearch"
-version = "0.6.4"
+version = "1.0.0"
 description = "Structure-aware document retrieval. FTS5/BM25 keyword matching over document trees."
 readme = "README.md"
 license = {text = "Apache-2.0"}
