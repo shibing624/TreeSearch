@@ -97,8 +97,8 @@ def _add_index_args(sub: argparse.ArgumentParser) -> None:
                      help="Min chars threshold for thinning (default: 15000)")
     sub.add_argument("--summary-threshold", type=int, default=600,
                      help="Chars threshold for summary generation (default: 600)")
-    sub.add_argument("--max-concurrency", type=int, default=5,
-                     help="Max concurrent indexing tasks (default: 5)")
+    sub.add_argument("--max-concurrency", type=int, default=None,
+                     help="Max concurrent indexing tasks (default: auto based on CPU cores)")
     sub.add_argument("--force", action="store_true",
                      help="Force re-index even if files unchanged")
     sub.add_argument("--stats", action="store_true",

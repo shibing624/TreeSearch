@@ -1075,8 +1075,8 @@ async def build_index(
     else:
         all_docs_from_db = {}
 
-    # Progress bar for saving stage
-    _save_bar = tqdm(total=len(expanded), desc="Saving", unit="file", dynamic_ncols=True)
+    # Progress bar for Indexing stage
+    _save_bar = tqdm(total=len(expanded), desc="Indexing", unit="file", dynamic_ncols=True)
     for fp in expanded:
         name = os.path.splitext(os.path.basename(fp))[0]
         if fp in result_map:
