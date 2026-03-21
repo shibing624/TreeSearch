@@ -60,6 +60,8 @@ from treesearch.search import search, search_sync, GrepFilter
 from treesearch.tree import Document, load_index, load_documents, save_index, flatten_tree, print_toc
 from treesearch.config import TreeSearchConfig, get_config, set_config, reset_config
 from treesearch.fts import FTS5Index
+from treesearch.tree_searcher import TreeSearcher, PathResult
+from treesearch.heuristics import build_query_plan, QueryPlan
 
 __all__ = [
     # Primary
@@ -68,6 +70,8 @@ __all__ = [
     "build_index", "md_to_tree", "text_to_tree", "IndexStats",
     # Search
     "search", "search_sync", "GrepFilter",
+    # Tree Search
+    "TreeSearcher", "PathResult", "build_query_plan", "QueryPlan",
     # Document & tree
     "Document", "load_index", "load_documents", "save_index", "flatten_tree", "print_toc",
     # Config

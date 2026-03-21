@@ -19,6 +19,7 @@ from typing import Optional
 
 from treesearch.search import search
 from treesearch.tree import Document, flatten_tree
+from treesearch.tree_searcher import TreeSearcher
 
 from metrics import (
     CostStats, CostTracker, aggregate_cost_stats,
@@ -135,6 +136,8 @@ def load_qasper(data_path: str, max_samples: int = 200) -> list[BenchmarkSample]
 def load_qasper_from_hf(split: str = "validation", max_samples: int = 200) -> tuple[list[BenchmarkSample], list[dict]]:
     """Load QASPER directly from HuggingFace datasets (allenai/qasper).
 
+    Uses local pkl cache to avoid slow HuggingFace loading on repeated runs.
+
     Args:
         split: 'train' or 'validation'
         max_samples: max number of QA samples
@@ -142,6 +145,19 @@ def load_qasper_from_hf(split: str = "validation", max_samples: int = 200) -> tu
     Returns:
         (samples, papers) - samples for evaluation, papers as raw dicts for indexing
     """
+    import pickle
+
+    cache_dir = os.path.join(os.path.dirname(__file__), ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"qasper_{split}_{max_samples}.pkl")
+
+    if os.path.isfile(cache_path):
+        with open(cache_path, "rb") as f:
+            samples, unique_papers = pickle.load(f)
+        logger.info("Loaded %d QASPER samples from cache (%s), %d papers",
+                    len(samples), cache_path, len(unique_papers))
+        return samples, unique_papers
+
     try:
         from datasets import load_dataset as hf_load
     except ImportError:
@@ -180,6 +196,12 @@ def load_qasper_from_hf(split: str = "validation", max_samples: int = 200) -> tu
 
     logger.info("Loaded %d QASPER samples from HuggingFace (%s split), %d papers",
                 len(samples), split, len(unique_papers))
+
+    # Save to pkl cache for fast subsequent loads
+    with open(cache_path, "wb") as f:
+        pickle.dump((samples, unique_papers), f)
+    logger.info("Saved QASPER cache to %s", cache_path)
+
     return samples, unique_papers
 
 
@@ -420,8 +442,6 @@ async def _evaluate_sample(
                 from treesearch.fts import FTS5Index
                 fts_index = FTS5Index()
                 fts_index.index_documents(documents)
-            # Use score_nodes (with ancestor propagation) per target doc,
-            # then merge and rank
             all_scored: list[tuple[str, float]] = []
             target_docs = documents
             if sample.doc_id:
@@ -433,6 +453,29 @@ async def _evaluate_sample(
                 all_scored.extend(node_scores.items())
             all_scored.sort(key=lambda x: -x[1])
             retrieved_node_ids = [nid for nid, _ in all_scored[:top_k]]
+        elif strategy == "tree":
+            # Tree mode: anchor retrieval -> tree walk -> path aggregation
+            fts_index = cached_indexes.get("fts5")
+            if fts_index is None:
+                from treesearch.fts import FTS5Index
+                fts_index = FTS5Index()
+                fts_index.index_documents(documents)
+            # Reuse cached TreeSearcher (built once per strategy in _build_cached_indexes)
+            searcher = cached_indexes.get("tree_searcher")
+            if searcher is None:
+                searcher = TreeSearcher()
+            target_docs = documents
+            if sample.doc_id:
+                matched = [d for d in documents if sample.doc_id in d.doc_id or sample.doc_id in d.doc_name]
+                if matched:
+                    target_docs = matched
+            fts_score_map: dict[str, dict[str, float]] = {}
+            for doc in target_docs:
+                scores = fts_index.score_nodes(sample.question, doc.doc_id)
+                if scores:
+                    fts_score_map[doc.doc_id] = scores
+            paths, flat_nodes = searcher.search(sample.question, target_docs, fts_score_map)
+            retrieved_node_ids = [fn["node_id"] for fn in flat_nodes[:top_k]]
         else:
             result = await search(
                 query=sample.question,
@@ -464,19 +507,38 @@ async def _evaluate_sample(
 def _build_cached_indexes(
     strategy: str,
     documents: list[Document],
+    shared_indexes: dict | None = None,
 ) -> dict:
     """Pre-build and cache indexes for a given strategy.
 
-    FTS5 indexes are built once and reused across all samples.
-    """
-    indexes = {}
+    FTS5 indexes are built once and reused across all samples and strategies.
 
-    if strategy == "fts5":
+    Args:
+        strategy: search strategy name
+        documents: list of Document objects
+        shared_indexes: pre-existing indexes to reuse (avoids rebuilding FTS5 across strategies)
+    """
+    indexes = dict(shared_indexes) if shared_indexes else {}
+
+    if strategy in ("fts5", "tree") and "fts5" not in indexes:
         from treesearch.fts import FTS5Index
         fts_index = FTS5Index()
         fts_index.index_documents(documents)
         indexes["fts5"] = fts_index
         logger.info("Pre-built FTS5 index for %d documents", len(documents))
+
+    if strategy == "tree" and "tree_searcher" not in indexes:
+        from treesearch.config import get_config, set_config, TreeSearchConfig
+        # Set wider config for benchmark before creating searcher
+        old_cfg = get_config()
+        set_config(TreeSearchConfig(
+            path_top_k=max(10, old_cfg.path_top_k),
+            anchor_top_k=max(10, old_cfg.anchor_top_k),
+            max_expansions=max(60, old_cfg.max_expansions),
+        ))
+        searcher = TreeSearcher()
+        indexes["tree_searcher"] = searcher
+        logger.info("Pre-built TreeSearcher for benchmark")
 
     return indexes
 
@@ -530,13 +592,15 @@ async def run_benchmark(
     logger.info("Benchmark: %d samples, strategies=%s, model=%s", len(samples), strategies, model)
 
     reports = []
+    shared_indexes: dict = {}  # Shared across strategies to avoid rebuilding FTS5
     for strategy in strategies:
         print(f"\n{'='*60}")
         print(f"Strategy: {strategy.upper()} | Dataset: {dataset} | Samples: {len(samples)}")
         print(f"{'='*60}")
 
-        # Pre-build indexes once per strategy (avoids per-sample rebuild)
-        cached_indexes = _build_cached_indexes(strategy, documents)
+        # Build indexes (reuses shared_indexes from previous strategies)
+        cached_indexes = _build_cached_indexes(strategy, documents, shared_indexes)
+        shared_indexes.update(cached_indexes)
 
         # Run evaluation with concurrency control
         semaphore = asyncio.Semaphore(max_concurrency)
@@ -658,13 +722,15 @@ async def run_benchmark_with_samples(
     logger.info("Benchmark: %d samples, strategies=%s, model=%s", len(samples), strategies, model)
 
     reports = []
+    shared_indexes: dict = {}  # Shared across strategies to avoid rebuilding FTS5
     for strategy in strategies:
         print(f"\n{'='*60}")
         print(f"Strategy: {strategy.upper()} | Dataset: {dataset_name} | Samples: {len(samples)}")
         print(f"{'='*60}")
 
-        # Pre-build indexes once per strategy (avoids per-sample rebuild)
-        cached_indexes = _build_cached_indexes(strategy, documents)
+        # Build indexes (reuses shared_indexes from previous strategies)
+        cached_indexes = _build_cached_indexes(strategy, documents, shared_indexes)
+        shared_indexes.update(cached_indexes)
 
         semaphore = asyncio.Semaphore(max_concurrency)
         results: list[SampleResult] = []

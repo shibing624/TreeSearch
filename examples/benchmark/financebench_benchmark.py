@@ -121,9 +121,24 @@ def load_financebench_from_hf(
 ) -> tuple[list[FinanceBenchSample], list[BenchmarkSample]]:
     """Load FinanceBench from HuggingFace (PatronusAI/financebench).
 
+    Uses local pkl cache to avoid slow HuggingFace loading on repeated runs.
+
     Returns:
         (raw_samples, benchmark_samples) - raw data and BenchmarkSample wrappers
     """
+    import pickle
+
+    cache_dir = os.path.join(os.path.dirname(__file__), ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"financebench_{max_samples}.pkl")
+
+    if os.path.isfile(cache_path):
+        with open(cache_path, "rb") as f:
+            raw_samples, benchmark_samples = pickle.load(f)
+        logger.info("Loaded %d FinanceBench samples from cache (%s)",
+                    len(raw_samples), cache_path)
+        return raw_samples, benchmark_samples
+
     try:
         from datasets import load_dataset as hf_load
     except ImportError:
@@ -198,6 +213,12 @@ def load_financebench_from_hf(
         ))
 
     logger.info("Loaded %d FinanceBench samples", len(raw_samples))
+
+    # Save to pkl cache for fast subsequent loads
+    with open(cache_path, "wb") as f:
+        pickle.dump((raw_samples, benchmark_samples), f)
+    logger.info("Saved FinanceBench cache to %s", cache_path)
+
     return raw_samples, benchmark_samples
 
 
@@ -732,6 +753,90 @@ def evaluate_fts5(
     return avg_metrics, all_results
 
 
+def evaluate_tree(
+    samples: list[BenchmarkSample],
+    documents: list[Document],
+    k_values: list[int],
+) -> tuple[dict, list[dict]]:
+    """Evaluate Tree mode (Best-First Search) retrieval on FinanceBench samples.
+
+    Returns:
+        (avg_metrics, per_sample_results)
+    """
+    from treesearch.tree_searcher import TreeSearcher
+    from treesearch.config import set_config as _set_cfg, get_config as _get_cfg, TreeSearchConfig as _TSCfg
+
+    fts_index = FTS5Index()
+    fts_index.index_documents(documents)
+
+    # Use wider config for benchmark
+    _old = _get_cfg()
+    _set_cfg(_TSCfg(
+        path_top_k=max(max(k_values), _old.path_top_k),
+        anchor_top_k=max(max(k_values), _old.anchor_top_k),
+        max_expansions=max(60, _old.max_expansions),
+    ))
+
+    all_results = []
+    cost_stats = []
+
+    for i, sample in enumerate(samples):
+        tracker = CostTracker()
+        with tracker:
+            target_docs = documents
+            if sample.doc_id:
+                matched = [d for d in documents if sample.doc_id in d.doc_id or sample.doc_id in d.doc_name]
+                if matched:
+                    target_docs = matched
+            fts_score_map: dict[str, dict[str, float]] = {}
+            for doc in target_docs:
+                scores = fts_index.score_nodes(sample.question, doc.doc_id)
+                if scores:
+                    fts_score_map[doc.doc_id] = scores
+            searcher = TreeSearcher()
+            paths, flat_nodes = searcher.search(sample.question, target_docs, fts_score_map)
+            retrieved_node_ids = [fn["node_id"] for fn in flat_nodes[:max(k_values)]]
+
+        relevant_node_ids = resolve_relevant_nodes(sample, documents)
+        has_evidence = bool(sample.evidence_texts and any(e for e in sample.evidence_texts))
+        if has_evidence:
+            metrics = evaluate_query(retrieved_node_ids, relevant_node_ids, k_values) if relevant_node_ids else evaluate_query(retrieved_node_ids, ["__no_match__"], k_values)
+        else:
+            metrics = {}
+
+        if not has_evidence:
+            print(f"  [{i + 1}/{len(samples)}] Skipped (no evidence)")
+        else:
+            hit = "HIT" if metrics.get("hit@5", 0) > 0 else "miss"
+            print(f"  [{i + 1}/{len(samples)}] MRR={metrics.get('mrr', 0):.2f} "
+                  f"P@3={metrics.get('precision@3', 0):.2f} R@5={metrics.get('recall@5', 0):.2f} "
+                  f"[{hit}] {tracker.stats.latency_seconds:.3f}s")
+
+        all_results.append({
+            "metrics": metrics,
+            "cost": tracker.stats,
+            "sample": sample,
+        })
+        cost_stats.append(tracker.stats)
+
+    _set_cfg(_old)  # restore config
+
+    valid = [r for r in all_results if r["metrics"]]
+    if valid:
+        avg_metrics = {}
+        for key in valid[0]["metrics"]:
+            avg_metrics[key] = sum(r["metrics"].get(key, 0) for r in valid) / len(valid)
+        avg_cost = aggregate_cost_stats([r["cost"] for r in valid])
+        avg_metrics["avg_query_time"] = avg_cost.latency_seconds
+    else:
+        avg_metrics = {}
+
+    avg_metrics["total_queries"] = len(samples)
+    avg_metrics["valid_queries"] = len(valid)
+
+    return avg_metrics, all_results
+
+
 def evaluate_embedding(
     samples: list[BenchmarkSample],
     embedding_index: EmbeddingIndex,
@@ -1039,13 +1144,30 @@ async def main():
     fts_metrics["index_time"] = index_time
     fts_per_type = compute_per_type_metrics(fts_results)
 
-    all_results = {"treesearch_fts5": fts_metrics}
+    # Step 4b: Evaluate Tree mode
+    print(f"\n{'=' * 60}")
+    print(f"Strategy: TREESEARCH TREE (Best-First Search) | Samples: {len(benchmark_samples)}")
+    print(f"{'=' * 60}")
+
+    tree_metrics, tree_results = evaluate_tree(benchmark_samples, documents, k_values)
+    tree_metrics["index_time"] = index_time
+    tree_per_type = compute_per_type_metrics(tree_results)
+
+    all_results = {
+        "treesearch_fts5": fts_metrics,
+        "treesearch_tree": tree_metrics,
+    }
     extra_info = {
         "treesearch_fts5": {
             "index_time": index_time,
             "num_items": total_nodes,
             "avg_query_time": fts_metrics.get("avg_query_time", 0),
-        }
+        },
+        "treesearch_tree": {
+            "index_time": index_time,
+            "num_items": total_nodes,
+            "avg_query_time": tree_metrics.get("avg_query_time", 0),
+        },
     }
 
     # Step 5: Evaluate embedding (optional)
@@ -1101,6 +1223,18 @@ async def main():
         fts_per_type=fts_per_type,
         extra_info=extra_info,
     )
+
+    # Print tree per-type breakdown
+    if tree_per_type:
+        print(f"\n  Per Question-Reasoning Type (TREE)")
+        print(f"  {'Type':<28}{'Count':>6}{'MRR':>10}{'R@5':>10}{'Hit@5':>10}")
+        print(f"  {'_' * 64}")
+        for qtype, info in sorted(tree_per_type.items(), key=lambda x: -x[1]["count"]):
+            m = info["metrics"]
+            print(f"  {qtype:<28}{info['count']:>6}"
+                  f"{m.get('mrr', 0):>10.4f}"
+                  f"{m.get('recall@5', 0):>10.4f}"
+                  f"{m.get('hit@5', 0):>10.4f}")
 
     # Step 7: Save results
     os.makedirs(args.output_dir, exist_ok=True)

@@ -256,6 +256,7 @@ async def search(
     text_mode: str = "full",
     include_ancestors: bool = False,
     merge_strategy: str = "interleave",
+    search_mode: Optional[str] = None,
     **kwargs,
 ) -> dict:
     """
@@ -272,11 +273,12 @@ async def search(
         text_mode: 'full' (default) | 'summary' | 'none' - controls text in results
         include_ancestors: attach ancestor titles for context anchoring
         merge_strategy: 'interleave' (default) | 'per_doc' | 'global_score'
+        search_mode: 'tree' (default) | 'flat' - tree mode uses Best-First Search,
+                     flat mode uses the original FTS5-only ranking
 
     Returns:
-        dict with 'documents' (list), 'query' (str), and 'flat_nodes' (list).
-        documents: [{'doc_id', 'doc_name', 'nodes': [{'node_id', 'title', 'text', 'score'}]}]
-        flat_nodes: [{'node_id', 'doc_id', 'doc_name', 'title', 'score', 'text'}, ...]
+        dict with 'documents' (list), 'query' (str), 'flat_nodes' (list),
+        and optionally 'paths' (list) when search_mode='tree'.
     """
     cfg = get_config()
 
@@ -285,6 +287,8 @@ async def search(
         top_k_docs = cfg.top_k_docs
     if max_nodes_per_doc is None:
         max_nodes_per_doc = cfg.max_nodes_per_doc
+    if search_mode is None:
+        search_mode = cfg.search_mode
 
     # Stage 1: document routing (FTS5-based)
     if len(documents) <= 1:
@@ -292,7 +296,6 @@ async def search(
     else:
         from .fts import get_fts_index
         fts_index = get_fts_index(db_path=cfg.fts_db_path or None)
-        # Batch check and index unindexed documents
         doc_map = {doc.doc_id: doc for doc in documents}
         unindexed = fts_index.get_unindexed_doc_ids(list(doc_map.keys()))
         for doc_id in unindexed:
@@ -308,10 +311,9 @@ async def search(
 
     logger.debug("Selected %d documents: %s", len(selected), [d.doc_name for d in selected])
 
-    # Stage 1.5: Pre-filter scoring
+    # Stage 1.5: Pre-filter scoring (build scorer for both modes)
     scorer = pre_filter
     if scorer is None and selected:
-        # Check if any selected document recommends grep pre-filter
         from .parsers import get_prefilters_for_source_type
         use_grep = False
         for doc in selected:
@@ -322,12 +324,139 @@ async def search(
 
         if use_grep:
             grep_filter = GrepFilter(selected)
-            fts_index = _get_fts_scorer(selected, cfg)
-            scorer = _CombinedScorer(grep_filter, fts_index) if fts_index else grep_filter
+            fts_scorer = _get_fts_scorer(selected, cfg)
+            scorer = _CombinedScorer(grep_filter, fts_scorer) if fts_scorer else grep_filter
         else:
             scorer = _get_fts_scorer(selected, cfg)
 
-    # Stage 2: tree search within each document (concurrent)
+    # Branch: tree mode vs flat mode
+    if search_mode == "tree" and scorer is not None:
+        return await _search_tree_mode(
+            query, selected, scorer, cfg,
+            max_nodes_per_doc=max_nodes_per_doc,
+            text_mode=text_mode,
+            include_ancestors=include_ancestors,
+            merge_strategy=merge_strategy,
+        )
+
+    # Flat mode (original behavior)
+    return await _search_flat_mode(
+        query, selected, scorer, cfg,
+        max_nodes_per_doc=max_nodes_per_doc,
+        text_mode=text_mode,
+        include_ancestors=include_ancestors,
+        merge_strategy=merge_strategy,
+    )
+
+
+async def _search_tree_mode(
+    query: str,
+    selected: list[Document],
+    scorer,
+    cfg,
+    max_nodes_per_doc: int = 5,
+    text_mode: str = "full",
+    include_ancestors: bool = False,
+    merge_strategy: str = "interleave",
+) -> dict:
+    """Tree search mode: anchor retrieval -> tree walk -> path aggregation."""
+    from .tree_searcher import TreeSearcher
+
+    # Build FTS score maps for all selected documents
+    fts_score_map: dict[str, dict[str, float]] = {}
+    for doc in selected:
+        scores = scorer.score_nodes(query, doc.doc_id)
+        if scores:
+            fts_score_map[doc.doc_id] = scores
+
+    # Run tree search
+    searcher = TreeSearcher()
+    paths, tree_flat_nodes = searcher.search(query, selected, fts_score_map)
+
+    # Build document-grouped results (compatible with old API)
+    doc_results: list[dict] = []
+    doc_nodes_map: dict[str, list[dict]] = {}
+    for fn in tree_flat_nodes:
+        did = fn["doc_id"]
+        doc_nodes_map.setdefault(did, []).append(fn)
+
+    for doc in selected:
+        nodes = doc_nodes_map.get(doc.doc_id, [])[:max_nodes_per_doc]
+        # Attach full node fields
+        enriched_nodes = []
+        for n in nodes:
+            enriched_nodes.append({
+                "node_id": n["node_id"],
+                "title": n["title"],
+                "score": n["score"],
+            })
+        _attach_node_fields(enriched_nodes, doc, text_mode=text_mode, include_ancestors=include_ancestors)
+        if enriched_nodes:
+            doc_results.append({
+                "doc_id": doc.doc_id,
+                "doc_name": doc.doc_name,
+                "nodes": enriched_nodes,
+            })
+
+    merged = _merge_doc_results(doc_results, merge_strategy)
+
+    # Build flat_nodes with text and char limit
+    max_result_chars = cfg.max_result_chars
+    flat_nodes = []
+    total_chars = 0
+    for doc_result in merged:
+        for node in doc_result.get("nodes", []):
+            node_text = node.get("text", "")
+            if max_result_chars and total_chars + len(node_text) > max_result_chars and flat_nodes:
+                break
+            flat_nodes.append({
+                "node_id": node.get("node_id", ""),
+                "doc_id": doc_result.get("doc_id", ""),
+                "doc_name": doc_result.get("doc_name", ""),
+                "title": node.get("title", ""),
+                "score": node.get("score", 0),
+                "text": node_text,
+            })
+            total_chars += len(node_text)
+        else:
+            continue
+        break
+    flat_nodes.sort(key=lambda x: (-x["score"], x["node_id"]))
+
+    # Serialize paths for output
+    serialized_paths = []
+    for pr in paths:
+        serialized_paths.append({
+            "doc_id": pr.doc_id,
+            "doc_name": pr.doc_name,
+            "score": pr.score,
+            "anchor_node_id": pr.anchor_node_id,
+            "target_node_id": pr.target_node_id,
+            "path": pr.path,
+            "reasons": pr.reasons,
+            "snippet": pr.snippet,
+        })
+
+    return {
+        "documents": merged,
+        "query": query,
+        "flat_nodes": flat_nodes,
+        "paths": serialized_paths,
+        "mode": "tree",
+    }
+
+
+async def _search_flat_mode(
+    query: str,
+    selected: list[Document],
+    scorer,
+    cfg,
+    max_nodes_per_doc: int = 5,
+    text_mode: str = "full",
+    include_ancestors: bool = False,
+    merge_strategy: str = "interleave",
+) -> dict:
+    """Flat search mode (original behavior): FTS5 scoring -> rank -> return."""
     async def _search_doc(doc: Document) -> dict:
         nodes = []
         if scorer is not None:
@@ -343,17 +472,13 @@ async def search(
                     break
 
         _attach_node_fields(nodes, doc, text_mode=text_mode, include_ancestors=include_ancestors)
-
         return {"doc_id": doc.doc_id, "doc_name": doc.doc_name, "nodes": nodes}
 
     raw_results = await asyncio.gather(*(_search_doc(d) for d in selected))
     doc_results = list(raw_results)
 
-    # Stage 3: merge results across documents
     merged = _merge_doc_results(doc_results, merge_strategy)
 
-    # Build flat_nodes: all nodes sorted by score across all documents
-    # Enforce max_result_chars: stop adding nodes when total text exceeds limit
     max_result_chars = cfg.max_result_chars
     flat_nodes = []
     total_chars = 0
@@ -380,6 +505,7 @@ async def search(
         "documents": merged,
         "query": query,
         "flat_nodes": flat_nodes,
+        "mode": "flat",
     }
 
 

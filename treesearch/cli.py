@@ -33,6 +33,8 @@ def _run_default(args) -> None:
     query = args.query
     db_path = args.db or "./index.db"
     max_nodes = args.max_nodes
+    search_mode = args.search_mode
+    show_path = args.show_path
 
     if not paths:
         print("Error: no paths specified. Usage: treesearch \"query\" path1 [path2 ...]",
@@ -41,18 +43,43 @@ def _run_default(args) -> None:
 
     start_time = time.time()
 
-    # TreeSearch handles everything: directory discovery, lazy indexing, search
     ts = TreeSearch(*paths, db_path=db_path)
-    result = ts.search(query, max_nodes_per_doc=max_nodes)
+    result = ts.search(query, max_nodes_per_doc=max_nodes, search_mode=search_mode)
     elapsed = time.time() - start_time
 
     if not result["documents"] or not result["flat_nodes"]:
         print(f"No results found for: {query}")
         return
 
+    mode = result.get("mode", "flat")
     total_nodes = sum(len(d["nodes"]) for d in result["documents"])
-    print(f"Found {total_nodes} result(s) in {len(result['documents'])} doc(s) ({elapsed:.1f}s)\n")
+    print(f"Found {total_nodes} result(s) in {len(result['documents'])} doc(s) [{mode} mode] ({elapsed:.1f}s)\n")
 
+    # Show path results if available and requested
+    if show_path and "paths" in result:
+        for i, path_info in enumerate(result["paths"], 1):
+            score = path_info.get("score", 0)
+            doc_name = path_info.get("doc_name", "")
+            reasons = path_info.get("reasons", [])
+            path_nodes = path_info.get("path", [])
+            snippet = path_info.get("snippet", "")
+
+            print(f"Path {i} ({score:.2f}) {doc_name}")
+            for j, pn in enumerate(path_nodes):
+                indent = "    " * j
+                connector = "|-- " if j < len(path_nodes) - 1 else "`-> "
+                print(f"  {indent}{connector}{pn.get('title', '')}")
+            if snippet:
+                preview = snippet[:300]
+                if len(snippet) > 300:
+                    preview += "..."
+                for line in preview.split("\n"):
+                    print(f"        {line}")
+            if reasons:
+                print(f"    reasons: {'; '.join(reasons[:5])}")
+            print()
+
+    # Show flat node results
     for doc_result in result["documents"]:
         doc_name = doc_result["doc_name"]
         for node in doc_result["nodes"]:
@@ -62,13 +89,10 @@ def _run_default(args) -> None:
             line_end = node.get("line_end")
             text = node.get("text", "")
 
-            # Header: [score] doc_name > title  (lines X-Y)
             loc = f"  (lines {line_start}-{line_end})" if line_start and line_end else ""
             print(f"[{score:.2f}] {doc_name} > {title}{loc}")
 
-            # Text content
             if text:
-                # Show up to 500 chars, preserve first few lines for readability
                 preview = text[:500]
                 if len(text) > 500:
                     preview += "..."
@@ -155,6 +179,11 @@ def _add_search_args(sub: argparse.ArgumentParser) -> None:
                      help="Max documents to search (default: 3)")
     sub.add_argument("--max-nodes", type=int, default=5,
                      help="Max result nodes per document (default: 5)")
+    sub.add_argument("--search-mode", type=str, default="tree",
+                     choices=["tree", "flat"],
+                     help="Search mode: 'tree' or 'flat' (default: tree)")
+    sub.add_argument("--show-path", action="store_true",
+                     help="Show path-based results (tree mode only)")
 
 
 def _load_documents_from_dir(index_dir: str, db: str = ""):
@@ -187,6 +216,7 @@ async def _run_search(args) -> None:
         documents=documents,
         top_k_docs=args.top_k_docs,
         max_nodes_per_doc=args.max_nodes,
+        search_mode=args.search_mode,
     )
     elapsed = time.time() - start_time
 
@@ -194,8 +224,33 @@ async def _run_search(args) -> None:
         print("\nNo relevant results found.")
         return
 
+    mode = result.get("mode", "flat")
     total_nodes = sum(len(d["nodes"]) for d in result["documents"])
-    print(f"\nFound {total_nodes} result(s) in {len(result['documents'])} doc(s) ({elapsed:.1f}s)\n")
+    print(f"\nFound {total_nodes} result(s) in {len(result['documents'])} doc(s) [{mode} mode] ({elapsed:.1f}s)\n")
+
+    # Show paths if available
+    if args.show_path and "paths" in result:
+        for i, path_info in enumerate(result["paths"], 1):
+            score = path_info.get("score", 0)
+            doc_name = path_info.get("doc_name", "")
+            path_nodes = path_info.get("path", [])
+            reasons = path_info.get("reasons", [])
+            snippet = path_info.get("snippet", "")
+
+            print(f"Path {i} ({score:.2f}) {doc_name}")
+            for j, pn in enumerate(path_nodes):
+                indent = "    " * j
+                connector = "|-- " if j < len(path_nodes) - 1 else "`-> "
+                print(f"  {indent}{connector}{pn.get('title', '')}")
+            if snippet:
+                preview = snippet[:300]
+                if len(snippet) > 300:
+                    preview += "..."
+                for line in preview.split("\n"):
+                    print(f"        {line}")
+            if reasons:
+                print(f"    reasons: {'; '.join(reasons[:5])}")
+            print()
 
     for doc_result in result["documents"]:
         doc_name = doc_result["doc_name"]
@@ -249,6 +304,11 @@ def _build_default_parser() -> argparse.ArgumentParser:
                    help="Path to SQLite database file (default: ./index.db)")
     p.add_argument("--max-nodes", type=int, default=5,
                    help="Max result nodes per document (default: 5)")
+    p.add_argument("--search-mode", type=str, default="tree",
+                   choices=["tree", "flat"],
+                   help="Search mode: 'tree' (Best-First Search) or 'flat' (original FTS5-only). Default: tree")
+    p.add_argument("--show-path", action="store_true",
+                   help="Show path-based results with traversal trace (tree mode only)")
     return p
 
 

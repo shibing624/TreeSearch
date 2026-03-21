@@ -6,7 +6,6 @@
 import copy
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -29,15 +28,26 @@ class Document:
 
     def __post_init__(self):
         self._node_map: dict[str, dict] = {}
-        self._rebuild_node_map()
+        self._parent_map: dict[str, Optional[str]] = {}
+        self._children_map: dict[str, list[str]] = {}
+        self._depth_map: dict[str, int] = {}
+        self._rebuild_maps()
 
-    def _rebuild_node_map(self) -> None:
-        """Build O(1) node_id -> node dict mapping from tree structure."""
+    def _rebuild_maps(self) -> None:
+        """Build all cached maps from tree structure in a single pass."""
         self._node_map.clear()
-        for node in flatten_tree(self.structure):
-            nid = node.get("node_id")
-            if nid:
-                self._node_map[nid] = node
+        self._parent_map.clear()
+        self._children_map.clear()
+        self._depth_map.clear()
+
+        self._node_map, self._parent_map, self._depth_map = build_tree_maps(
+            self.structure
+        )
+
+        # Build children_map from parent_map
+        for nid, pid in self._parent_map.items():
+            if pid is not None:
+                self._children_map.setdefault(pid, []).append(nid)
 
     def get_tree_without_text(self) -> list:
         """Return tree with text fields removed (for compact display)."""
@@ -46,6 +56,52 @@ class Document:
     def get_node_by_id(self, node_id: str) -> Optional[dict]:
         """Find a node by its node_id. O(1) via cached node map."""
         return self._node_map.get(node_id)
+
+    def get_parent_id(self, node_id: str) -> Optional[str]:
+        """Get parent node_id. Returns None for root nodes."""
+        return self._parent_map.get(node_id)
+
+    def get_children_ids(self, node_id: str) -> list[str]:
+        """Get direct children node_ids."""
+        return self._children_map.get(node_id, [])
+
+    def get_sibling_ids(self, node_id: str) -> list[str]:
+        """Get sibling node_ids (same parent, excluding self)."""
+        pid = self._parent_map.get(node_id)
+        if pid is None:
+            # Root-level siblings
+            siblings = []
+            for node in (self.structure if isinstance(self.structure, list) else [self.structure]):
+                nid = node.get("node_id", "")
+                if nid and nid != node_id:
+                    siblings.append(nid)
+            return siblings
+        return [c for c in self._children_map.get(pid, []) if c != node_id]
+
+    def get_depth(self, node_id: str) -> int:
+        """Get node depth (0 = root)."""
+        return self._depth_map.get(node_id, 0)
+
+    def get_path_to_root(self, node_id: str) -> list[str]:
+        """Get path from node to root as list of node_ids (root first)."""
+        path = []
+        current = node_id
+        while current is not None:
+            path.append(current)
+            current = self._parent_map.get(current)
+        path.reverse()
+        return path
+
+    def get_subtree_node_ids(self, node_id: str) -> list[str]:
+        """Get all node_ids in the subtree rooted at node_id (BFS)."""
+        result = [node_id]
+        queue = [node_id]
+        while queue:
+            nid = queue.pop(0)
+            children = self._children_map.get(nid, [])
+            result.extend(children)
+            queue.extend(children)
+        return result
 
 
 # ---------------------------------------------------------------------------

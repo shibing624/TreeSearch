@@ -429,7 +429,11 @@ async def build_paper_indexes(
     max_concurrency: int = 5,
     force: bool = False,
 ) -> list[Document]:
-    """Build tree indexes for QASPER papers."""
+    """Build tree indexes for QASPER papers.
+
+    Optimization: only writes MD files when content actually changed,
+    preserving file mtime for incremental index caching.
+    """
     os.makedirs(output_dir, exist_ok=True)
     md_dir = os.path.join(output_dir, "md_papers")
     os.makedirs(md_dir, exist_ok=True)
@@ -440,8 +444,19 @@ async def build_paper_indexes(
         safe_id = paper_id.replace("/", "_").replace("\\", "_")
         md_path = os.path.join(md_dir, f"{safe_id}.md")
         md_content = paper_to_markdown(paper)
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(md_content)
+
+        # Only write if content changed (preserves mtime for incremental indexing)
+        needs_write = True
+        if os.path.isfile(md_path):
+            with open(md_path, "r", encoding="utf-8") as f:
+                existing = f.read()
+            if existing == md_content:
+                needs_write = False
+
+        if needs_write:
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(md_content)
+
         md_paths.append(md_path)
 
     logger.info("Building indexes for %d papers...", len(md_paths))
@@ -635,96 +650,176 @@ async def run_embedding_comparison(
         num_chunks=sum(len(flatten_tree(d.structure)) for d in documents),
     )
 
-    # Print comparison
+    # Evaluate Tree mode retrieval
+    from treesearch.tree_searcher import TreeSearcher
+    from treesearch.config import set_config as _set_config, get_config as _get_config, TreeSearchConfig as _TSCfg
+
+    print(f"\n{'=' * 60}")
+    print(f"Strategy: TREE (TreeSearch Best-First) | Samples: {len(samples)}")
+    print(f"{'=' * 60}")
+
+    # Use wider config for benchmark: more paths and anchors
+    _old_cfg = _get_config()
+    _set_config(_TSCfg(
+        path_top_k=max(max(k_values), _old_cfg.path_top_k),
+        anchor_top_k=max(max(k_values), _old_cfg.anchor_top_k),
+        max_expansions=max(60, _old_cfg.max_expansions),
+    ))
+
+    tree_results = []
+    for i, sample in enumerate(samples):
+        tracker = CostTracker()
+        with tracker:
+            target_docs = documents
+            if sample.doc_id:
+                matched = [d for d in documents if sample.doc_id in d.doc_id or sample.doc_id in d.doc_name]
+                if matched:
+                    target_docs = matched
+            fts_score_map: dict[str, dict[str, float]] = {}
+            for doc in target_docs:
+                scores = fts_index.score_nodes(sample.question, doc.doc_id)
+                if scores:
+                    fts_score_map[doc.doc_id] = scores
+            searcher = TreeSearcher()
+            paths, flat_nodes = searcher.search(sample.question, target_docs, fts_score_map)
+            retrieved_node_ids = [fn["node_id"] for fn in flat_nodes[:max(k_values)]]
+
+        relevant_node_ids = resolve_relevant_nodes(sample, documents)
+        metrics = evaluate_query(retrieved_node_ids, relevant_node_ids, k_values) if relevant_node_ids else {}
+
+        if metrics:
+            hit = "HIT" if metrics.get("hit@1", 0) > 0 else "miss"
+            print(f"  [{i + 1}/{len(samples)}] MRR={metrics.get('mrr', 0):.2f} "
+                  f"P@3={metrics.get('precision@3', 0):.2f} R@3={metrics.get('recall@3', 0):.2f} "
+                  f"[{hit}] {tracker.stats.latency_seconds:.3f}s")
+        else:
+            print(f"  [{i + 1}/{len(samples)}] Skipped (no ground truth)")
+
+        tree_results.append({"metrics": metrics, "cost": tracker.stats})
+
+    _set_config(_old_cfg)  # restore config
+
+    valid_tree = [r for r in tree_results if r["metrics"]]
+    if valid_tree:
+        avg_tree_metrics = {}
+        for key in valid_tree[0]["metrics"]:
+            avg_tree_metrics[key] = sum(r["metrics"].get(key, 0) for r in valid_tree) / len(valid_tree)
+        cost_list = [r["cost"] for r in valid_tree]
+        avg_tree_cost = aggregate_cost_stats(cost_list)
+        total_tree_cost = CostStats(
+            total_tokens=sum(c.total_tokens for c in cost_list),
+            llm_calls=sum(c.llm_calls for c in cost_list),
+            latency_seconds=sum(c.latency_seconds for c in cost_list),
+        )
+    else:
+        avg_tree_metrics = {}
+        avg_tree_cost = CostStats()
+        total_tree_cost = CostStats()
+
+    tree_report = EmbeddingBenchmarkReport(
+        dataset="qasper",
+        strategy="tree",
+        model="N/A",
+        num_samples=len(valid_tree),
+        avg_retrieval_metrics=avg_tree_metrics,
+        avg_cost=avg_tree_cost,
+        total_cost=total_tree_cost,
+        embedding_time=treesearch_index_time,
+        num_chunks=sum(len(flatten_tree(d.structure)) for d in documents),
+    )
+
+    # Print comparison (3-way: Embedding vs FTS5 vs Tree)
     w = 80
     dataset_label = "QASPER"
     print(f"\n{'=' * w}")
-    print(f"  📋 BENCHMARK: {dataset_label} — Embedding vs TreeSearch (FTS5)")
+    print(f"  BENCHMARK: {dataset_label} -- Embedding vs FTS5 vs Tree")
     print(f"{'=' * w}")
 
     emb_m = emb_report.avg_retrieval_metrics
     fts_m = fts_report.avg_retrieval_metrics
+    tree_m = tree_report.avg_retrieval_metrics
 
-    def _row(label, emb_val, fts_val, fmt=".4f"):
-        return f"  {label:<22}{emb_val:>14{fmt}}{fts_val:>14{fmt}}"
+    def _row(label, emb_val, fts_val, tree_val, fmt=".4f"):
+        return f"  {label:<22}{emb_val:>14{fmt}}{fts_val:>14{fmt}}{tree_val:>14{fmt}}"
 
-    hdr = f"  {'Metric':<22}{'EMBEDDING':>14}{'FTS5':>14}"
-    sep = "  " + "-" * 50
+    hdr = f"  {'Metric':<22}{'EMBEDDING':>14}{'FTS5':>14}{'TREE':>14}"
+    sep = "  " + "-" * 64
 
-    # --- Ranking Quality ---
-    print(f"\n  ▸ Ranking Quality")
+    print(f"\n  Ranking Quality")
     print(hdr)
     print(sep)
-    print(_row("MRR", emb_m.get("mrr", 0), fts_m.get("mrr", 0)))
+    print(_row("MRR", emb_m.get("mrr", 0), fts_m.get("mrr", 0), tree_m.get("mrr", 0)))
     for k in [1, 3, 5, 10]:
-        print(_row(f"NDCG@{k}", emb_m.get(f"ndcg@{k}", 0), fts_m.get(f"ndcg@{k}", 0)))
+        print(_row(f"NDCG@{k}", emb_m.get(f"ndcg@{k}", 0), fts_m.get(f"ndcg@{k}", 0), tree_m.get(f"ndcg@{k}", 0)))
 
-    # --- Precision & Recall ---
-    print(f"\n  ▸ Precision / Recall / F1")
+    print(f"\n  Precision / Recall / F1")
     print(hdr)
     print(sep)
     for k in [1, 3, 5, 10]:
-        print(_row(f"P@{k}", emb_m.get(f"precision@{k}", 0), fts_m.get(f"precision@{k}", 0)))
-        print(_row(f"R@{k}", emb_m.get(f"recall@{k}", 0), fts_m.get(f"recall@{k}", 0)))
-        print(_row(f"F1@{k}", emb_m.get(f"f1@{k}", 0), fts_m.get(f"f1@{k}", 0)))
+        print(_row(f"P@{k}", emb_m.get(f"precision@{k}", 0), fts_m.get(f"precision@{k}", 0), tree_m.get(f"precision@{k}", 0)))
+        print(_row(f"R@{k}", emb_m.get(f"recall@{k}", 0), fts_m.get(f"recall@{k}", 0), tree_m.get(f"recall@{k}", 0)))
+        print(_row(f"F1@{k}", emb_m.get(f"f1@{k}", 0), fts_m.get(f"f1@{k}", 0), tree_m.get(f"f1@{k}", 0)))
         if k != 10:
             print()
 
-    # --- Hit Rate ---
-    print(f"\n  ▸ Hit Rate")
+    print(f"\n  Hit Rate")
     print(hdr)
     print(sep)
     for k in [1, 3, 5, 10]:
-        print(_row(f"Hit@{k}", emb_m.get(f"hit@{k}", 0), fts_m.get(f"hit@{k}", 0)))
+        print(_row(f"Hit@{k}", emb_m.get(f"hit@{k}", 0), fts_m.get(f"hit@{k}", 0), tree_m.get(f"hit@{k}", 0)))
 
-    # --- Cost & Efficiency ---
-    print(f"\n  ▸ Cost & Efficiency")
-    print(f"  {'Metric':<22}{'EMBEDDING':>14}{'FTS5':>14}")
+    print(f"\n  Cost & Efficiency")
+    print(f"  {'Metric':<22}{'EMBEDDING':>14}{'FTS5':>14}{'TREE':>14}")
     print(sep)
-    print(f"  {'Index time (s)':<22}{emb_report.embedding_time:>14.1f}{fts_report.embedding_time:>14.1f}")
-    print(f"  {'Num chunks/nodes':<22}{emb_report.num_chunks:>14}{fts_report.num_chunks:>14}")
-    print(f"  {'Avg query time (s)':<22}{emb_report.avg_cost.latency_seconds:>14.4f}{fts_report.avg_cost.latency_seconds:>14.4f}")
+    print(f"  {'Index time (s)':<22}{emb_report.embedding_time:>14.1f}{fts_report.embedding_time:>14.1f}{tree_report.embedding_time:>14.1f}")
+    print(f"  {'Num chunks/nodes':<22}{emb_report.num_chunks:>14}{fts_report.num_chunks:>14}{tree_report.num_chunks:>14}")
+    print(f"  {'Avg query time (s)':<22}{emb_report.avg_cost.latency_seconds:>14.4f}{fts_report.avg_cost.latency_seconds:>14.4f}{tree_report.avg_cost.latency_seconds:>14.4f}")
 
     print(f"\n{'=' * w}")
 
     # Summary
     emb_mrr = emb_m.get("mrr", 0)
     fts_mrr = fts_m.get("mrr", 0)
+    tree_mrr = tree_m.get("mrr", 0)
     emb_r5 = emb_m.get("recall@5", 0)
     fts_r5 = fts_m.get("recall@5", 0)
+    tree_r5 = tree_m.get("recall@5", 0)
     speed_ratio = emb_report.avg_cost.latency_seconds / fts_report.avg_cost.latency_seconds if fts_report.avg_cost.latency_seconds > 0 else 0
 
-    print(f"\n  📊 SUMMARY ({dataset_label})")
-    print(f"  {'─' * 50}")
-    print(f"  Embedding ({embedding_model}): MRR={emb_mrr:.4f}  R@5={emb_r5:.4f}  ⏱ {emb_report.avg_cost.latency_seconds:.4f}s/q")
-    print(f"  TreeSearch (FTS5):            MRR={fts_mrr:.4f}  R@5={fts_r5:.4f}  ⏱ {fts_report.avg_cost.latency_seconds:.4f}s/q")
+    print(f"\n  SUMMARY ({dataset_label})")
+    print(f"  {'_' * 64}")
+    print(f"  Embedding ({embedding_model}): MRR={emb_mrr:.4f}  R@5={emb_r5:.4f}  T={emb_report.avg_cost.latency_seconds:.4f}s/q")
+    print(f"  TreeSearch (FTS5):            MRR={fts_mrr:.4f}  R@5={fts_r5:.4f}  T={fts_report.avg_cost.latency_seconds:.4f}s/q")
+    print(f"  TreeSearch (Tree):            MRR={tree_mrr:.4f}  R@5={tree_r5:.4f}  T={tree_report.avg_cost.latency_seconds:.4f}s/q")
     print()
 
-    if fts_mrr > emb_mrr:
-        improvement = ((fts_mrr - emb_mrr) / emb_mrr * 100) if emb_mrr > 0 else 0
-        print(f"  ✅ TreeSearch FTS5 outperforms Embedding by {improvement:.1f}% on MRR")
+    best_mrr = max(emb_mrr, fts_mrr, tree_mrr)
+    best_r5 = max(emb_r5, fts_r5, tree_r5)
+    if tree_mrr == best_mrr:
+        print(f"  [best MRR] Tree mode wins with MRR={tree_mrr:.4f}")
+    elif fts_mrr == best_mrr:
+        print(f"  [best MRR] FTS5 flat mode wins with MRR={fts_mrr:.4f}")
     else:
-        improvement = ((emb_mrr - fts_mrr) / fts_mrr * 100) if fts_mrr > 0 else 0
-        print(f"  📊 Embedding outperforms TreeSearch FTS5 by {improvement:.1f}% on MRR")
+        print(f"  [best MRR] Embedding wins with MRR={emb_mrr:.4f}")
 
-    if fts_r5 > emb_r5:
-        r5_imp = ((fts_r5 - emb_r5) / emb_r5 * 100) if emb_r5 > 0 else 0
-        print(f"  ✅ TreeSearch FTS5 outperforms Embedding by {r5_imp:.1f}% on Recall@5")
+    if tree_r5 == best_r5:
+        print(f"  [best R@5] Tree mode wins with R@5={tree_r5:.4f}")
+    elif fts_r5 == best_r5:
+        print(f"  [best R@5] FTS5 flat mode wins with R@5={fts_r5:.4f}")
     else:
-        r5_imp = ((emb_r5 - fts_r5) / fts_r5 * 100) if fts_r5 > 0 else 0
-        print(f"  📊 Embedding outperforms TreeSearch FTS5 by {r5_imp:.1f}% on Recall@5")
+        print(f"  [best R@5] Embedding wins with R@5={emb_r5:.4f}")
 
-    print(f"  ⚡ TreeSearch FTS5 is {speed_ratio:.1f}x faster per query")
+    print(f"  FTS5/Tree is {speed_ratio:.1f}x faster per query vs Embedding")
 
     # Save reports
     os.makedirs(output_dir, exist_ok=True)
-    for r in [emb_report, fts_report]:
+    for r in [emb_report, fts_report, tree_report]:
         path = os.path.join(output_dir, f"qasper_{r.strategy}_report.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(r.to_dict(), f, indent=2, ensure_ascii=False)
         print(f"\nReport saved: {path}")
 
-    return emb_report, fts_report
+    return emb_report, fts_report, tree_report
 
 
 # ---------------------------------------------------------------------------
@@ -747,7 +842,7 @@ async def main():
     parser.add_argument(
         "--strategies", type=str, nargs="+",
         default=["fts5"],
-        help="Search strategies to evaluate (default: fts5)"
+        help="Search strategies to evaluate: fts5, tree (default: fts5)"
     )
     parser.add_argument("--max-samples", type=int, default=50, help="Max QA samples to evaluate")
     parser.add_argument("--max-papers", type=int, default=20, help="Max papers to index")

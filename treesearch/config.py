@@ -61,6 +61,17 @@ class TreeSearchConfig:
     fts_code_weight: float = 1.0
     fts_front_matter_weight: float = 2.0
 
+    # Tree Search
+    search_mode: str = "tree"  # "tree" | "flat"
+    anchor_top_k: int = 5  # max anchor nodes per document
+    max_anchor_per_doc: int = 3  # anchors to expand per document
+    max_expansions: int = 40  # max total node expansions in tree walk
+    max_hops: int = 3  # max depth offset from anchor
+    max_siblings: int = 2  # max sibling nodes to expand per step
+    min_frontier_score: float = 0.1  # stop if best frontier score below this
+    early_stop_score: float = 0.95  # stop early if a path reaches this score
+    path_top_k: int = 3  # top paths to return
+
     # Tokenizer
     cjk_tokenizer: str = "auto"  # "auto" | "jieba" | "bigram" | "char"
 

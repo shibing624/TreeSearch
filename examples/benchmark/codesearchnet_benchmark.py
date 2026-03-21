@@ -107,6 +107,8 @@ def load_codesearchnet_from_hf(
 ) -> tuple[list[CodeSample], CodeCorpus]:
     """Load CodeSearchNet from HuggingFace.
 
+    Uses local pkl cache to avoid slow HuggingFace loading on repeated runs.
+
     Args:
         language: Programming language (python, java, javascript, go, ruby, php)
         split: Dataset split (train, validation, test)
@@ -116,6 +118,19 @@ def load_codesearchnet_from_hf(
     Returns:
         (query_samples, corpus) - queries to evaluate, corpus to search in
     """
+    import pickle
+
+    cache_dir = os.path.join(os.path.dirname(__file__), ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"codesearchnet_{language}_{split}_{max_samples}_{max_corpus}.pkl")
+
+    if os.path.isfile(cache_path):
+        with open(cache_path, "rb") as f:
+            query_samples, corpus = pickle.load(f)
+        logger.info("Loaded %d query samples, %d corpus samples from cache (%s)",
+                    len(query_samples), len(corpus.samples), cache_path)
+        return query_samples, corpus
+
     try:
         from datasets import load_dataset as hf_load
     except ImportError:
@@ -153,6 +168,12 @@ def load_codesearchnet_from_hf(
     query_samples = corpus_samples[:max_samples]
 
     logger.info(f"Loaded {len(query_samples)} query samples, {len(corpus_samples)} corpus samples")
+
+    # Save to pkl cache for fast subsequent loads
+    with open(cache_path, "wb") as f:
+        pickle.dump((query_samples, corpus), f)
+    logger.info("Saved CodeSearchNet cache to %s", cache_path)
+
     return query_samples, corpus
 
 
@@ -382,6 +403,52 @@ class TreeSearchCodeIndex:
         return output
 
 
+class TreeSearchCodeTreeIndex:
+    """Tree mode (Best-First Search) code retrieval -- uses TreeSearcher."""
+
+    def __init__(self, base_index: TreeSearchCodeIndex):
+        self.base: TreeSearchCodeIndex = base_index
+
+    def search(self, query: str, top_k: int = 10) -> list[tuple[int, float]]:
+        """Tree search: anchor retrieval -> tree walk -> path aggregation."""
+        from treesearch.tree_searcher import TreeSearcher
+        from treesearch.config import set_config, get_config, TreeSearchConfig
+
+        fts_score_map: dict[str, dict[str, float]] = {}
+        for doc in self.base.documents:
+            scores = self.base.fts_index.score_nodes(query, doc.doc_id)
+            if scores:
+                fts_score_map[doc.doc_id] = scores
+
+        old_cfg = get_config()
+        set_config(TreeSearchConfig(
+            path_top_k=max(top_k, old_cfg.path_top_k),
+            anchor_top_k=max(top_k, old_cfg.anchor_top_k),
+            max_expansions=max(60, old_cfg.max_expansions),
+        ))
+        searcher = TreeSearcher()
+        paths, flat_nodes = searcher.search(query, self.base.documents, fts_score_map)
+        set_config(old_cfg)
+
+        # Map flat_nodes back to corpus idx
+        seen_idx = set()
+        output = []
+        for fn in flat_nodes:
+            doc_id = fn.get("doc_id", "")
+            try:
+                basename = os.path.basename(doc_id)
+                idx = int(basename.split("_")[1].split(".")[0])
+                if idx not in seen_idx:
+                    seen_idx.add(idx)
+                    output.append((idx, fn.get("score", 0.0)))
+                    if len(output) >= top_k:
+                        break
+            except (IndexError, ValueError):
+                pass
+
+        return output
+
+
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
@@ -487,6 +554,17 @@ async def main():
     ts_metrics["index_time"] = ts_index_time
     ts_metrics["num_nodes"] = sum(len(flatten_tree(d.structure)) for d in ts_index.documents)
     results["treesearch_fts5"] = ts_metrics
+
+    # Tree mode evaluation (reuses the same index)
+    print(f"\n{'=' * 60}")
+    print("Strategy: TREESEARCH TREE (Best-First Search)")
+    print(f"{'=' * 60}")
+
+    tree_index = TreeSearchCodeTreeIndex(ts_index)
+    tree_metrics = evaluate_retrieval(query_samples, tree_index)
+    tree_metrics["index_time"] = ts_index_time  # same index
+    tree_metrics["num_nodes"] = ts_metrics["num_nodes"]
+    results["treesearch_tree"] = tree_metrics
 
     # Embedding evaluation (optional)
     if args.with_embedding:

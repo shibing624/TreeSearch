@@ -215,6 +215,7 @@ examples/*.db
 benchmark_results/
 examples/benchmark/benchmark_results/
 examples/benchmark/indexes/
+examples/benchmark/.cache/
 examples/indexes/
 docs/internal/*
 examples/a.py
@@ -223,3 +224,5 @@ CLAUDE.md
 data/financebench_pdfs/*
 CODEBUDDY.md
 .codebuddy/
+.workbuddy/
+docs/update.md
