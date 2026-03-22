@@ -179,9 +179,9 @@ def _add_search_args(sub: argparse.ArgumentParser) -> None:
                      help="Max documents to search (default: 3)")
     sub.add_argument("--max-nodes", type=int, default=5,
                      help="Max result nodes per document (default: 5)")
-    sub.add_argument("--search-mode", type=str, default="tree",
-                     choices=["tree", "flat"],
-                     help="Search mode: 'tree' or 'flat' (default: tree)")
+    sub.add_argument("--search-mode", type=str, default="auto",
+                     choices=["auto", "tree", "flat"],
+                     help="Search mode: 'auto', 'tree' or 'flat' (default: auto)")
     sub.add_argument("--show-path", action="store_true",
                      help="Show path-based results (tree mode only)")
 

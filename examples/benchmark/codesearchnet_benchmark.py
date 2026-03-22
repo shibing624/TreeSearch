@@ -522,8 +522,9 @@ async def main():
     parser.add_argument("--max-samples", type=int, default=100, help="Max query samples to evaluate")
     parser.add_argument("--max-corpus", type=int, default=1000, help="Max corpus size")
     parser.add_argument("--top-k", type=int, default=10, help="Top-K results per query")
-    parser.add_argument("--output-dir", type=str, default="./benchmark_results/codesearchnet", help="Output directory")
-    parser.add_argument("--index-dir", type=str, default="./indexes/codesearchnet", help="Index directory")
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    parser.add_argument("--output-dir", type=str, default=os.path.join(_script_dir, "benchmark_results", "codesearchnet"), help="Output directory")
+    parser.add_argument("--index-dir", type=str, default=os.path.join(_script_dir, "indexes", "codesearchnet"), help="Index directory")
     parser.add_argument("--with-embedding", action="store_true", help="Also evaluate embedding-based retrieval")
     args = parser.parse_args()
 

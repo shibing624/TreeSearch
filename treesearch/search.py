@@ -273,8 +273,11 @@ async def search(
         text_mode: 'full' (default) | 'summary' | 'none' - controls text in results
         include_ancestors: attach ancestor titles for context anchoring
         merge_strategy: 'interleave' (default) | 'per_doc' | 'global_score'
-        search_mode: 'flat' (default) | 'tree' - flat mode uses FTS5-only ranking,
-                     tree mode uses Best-First Search over document trees
+        search_mode: 'auto' (default) | 'flat' | 'tree'
+                     - auto: automatically selects tree or flat based on document source types
+                       (tree for documents/markdown/pdf, flat for code)
+                     - flat: FTS5-only ranking
+                     - tree: Best-First Search over document trees (always uses tree walk)
 
     Returns:
         dict with 'documents' (list), 'query' (str), 'flat_nodes' (list),
@@ -329,8 +332,23 @@ async def search(
         else:
             scorer = _get_fts_scorer(selected, cfg)
 
-    # Branch: tree mode vs flat mode
-    if search_mode == "tree" and scorer is not None:
+    # Branch: resolve effective search mode
+    # - "auto": intelligently picks tree vs flat based on document source types
+    #   (tree for documents/markdown/pdf, flat for code-only collections)
+    # - "tree": always uses tree walk (pure tree mode)
+    # - "flat": always uses FTS5-only (pure flat mode)
+    effective_mode = search_mode
+    if search_mode == "auto" and selected:
+        code_count = sum(1 for d in selected if (d.source_type or "") == "code")
+        if code_count == len(selected):
+            effective_mode = "flat"
+            logger.debug("Auto mode → flat: all %d docs are code", len(selected))
+        else:
+            effective_mode = "tree"
+            logger.debug("Auto mode → tree: %d docs (%d code, %d non-code)",
+                        len(selected), code_count, len(selected) - code_count)
+
+    if effective_mode == "tree" and scorer is not None:
         return await _search_tree_mode(
             query, selected, scorer, cfg,
             max_nodes_per_doc=max_nodes_per_doc,
@@ -339,7 +357,7 @@ async def search(
             merge_strategy=merge_strategy,
         )
 
-    # Flat mode (original behavior)
+    # Flat mode (original behavior, or auto-resolved from auto mode)
     return await _search_flat_mode(
         query, selected, scorer, cfg,
         max_nodes_per_doc=max_nodes_per_doc,

@@ -847,8 +847,9 @@ async def main():
     parser.add_argument("--max-samples", type=int, default=50, help="Max QA samples to evaluate")
     parser.add_argument("--max-papers", type=int, default=20, help="Max papers to index")
     parser.add_argument("--top-k", type=int, default=10, help="Top-K results per query")
-    parser.add_argument("--output-dir", type=str, default="./benchmark_results/qasper", help="Output directory")
-    parser.add_argument("--index-dir", type=str, default="./indexes/qasper", help="Index directory")
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    parser.add_argument("--output-dir", type=str, default=os.path.join(_script_dir, "benchmark_results", "qasper"), help="Output directory")
+    parser.add_argument("--index-dir", type=str, default=os.path.join(_script_dir, "indexes", "qasper"), help="Index directory")
     parser.add_argument("--concurrency", type=int, default=3, help="Max concurrent evaluations")
     parser.add_argument("--force-reindex", action="store_true", help="Force re-indexing papers")
     parser.add_argument(

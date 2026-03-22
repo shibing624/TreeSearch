@@ -147,11 +147,11 @@ class TreeSearcher:
             doc_paths, walked_states = self._tree_walk(doc, anchors, doc_scores, plan, idf)
             all_paths.extend(doc_paths)
 
-            # Collect walked nodes with combined score
+            # Collect walked nodes with combined score and hop distance
             for state in walked_states:
                 fts_s = doc_scores.get(state.node_id, 0.0)
-                combined = 0.4 * state.score + 0.6 * fts_s
-                all_walked_nodes.append((doc.doc_id, state.node_id, combined, fts_s))
+                combined = 0.3 * state.score + 0.7 * fts_s
+                all_walked_nodes.append((doc.doc_id, state.node_id, combined, fts_s, state.hop))
 
         # Stage 3: Select top paths globally
         all_paths.sort(key=lambda p: -p.score)
@@ -450,18 +450,21 @@ class TreeSearcher:
     def _build_flat_nodes(
         self,
         paths: list[PathResult],
-        walked_nodes: list[tuple[str, str, float, float]],
+        walked_nodes: list[tuple[str, str, float, float, int]],
         documents: list[Document],
         fts_score_map: dict[str, dict[str, float]],
         plan: QueryPlan | None = None,
     ) -> list[dict]:
         """Build flat node list: FTS5 base + structural reranking from tree walk.
 
-        Strategy:
+        Strategy (5 stages):
         1. Base: all FTS5 scored nodes at their original score
-        2. Title-prefix propagation: nodes with low FTS5 score inherit from
-           logical parent (via ::: delimited title prefix matching)
-        3. Walk inject: walk-only nodes with positive FTS5 get their combined score
+        1b. Generic section demotion (for academic paper sections)
+        2. Title-prefix propagation (for ::: delimited hierarchies)
+        3. Walk boost + Walk-only injection
+        4. Parent context boost: propagate relevance from structurally close
+           high-scoring ancestors to low-scoring children (key for financial docs)
+        5. Term density boost: rerank by query term coverage
         """
         doc_map = {d.doc_id: d for d in documents}
         node_scores: dict[tuple[str, str], float] = {}
@@ -492,6 +495,7 @@ class TreeSearcher:
         # In QASPER, section titles use ::: delimiter for hierarchy,
         # e.g. "Systems ::: Baseline" is logically under "Systems".
         # If a logical parent has high FTS5 score, propagate a fraction.
+        from .tree import flatten_tree
         for doc_id, doc_scores in fts_score_map.items():
             doc = doc_map.get(doc_id)
             if not doc:
@@ -513,7 +517,6 @@ class TreeSearcher:
                 continue
 
             # Propagate to low-score nodes with matching title prefix
-            from .tree import flatten_tree
             all_nodes = flatten_tree(doc.structure)
             for node_dict in all_nodes:
                 nid = node_dict.get("node_id", "")
@@ -538,11 +541,117 @@ class TreeSearcher:
                     propagated = best_parent_fts * 0.30
                     node_scores[key] = max(current_score, propagated)
 
-        # 3. Walk inject: walk-only nodes not in FTS5 map, with positive fts
-        for doc_id, nid, combined_score, fts_s in walked_nodes:
+        # 3. Walk boost + Walk-only injection
+        # Walk boost: walked nodes with FTS5 scores get structural confirmation bonus.
+        # Walk-only injection: nodes FTS5 missed but structurally close to anchors.
+        walked_set: set[tuple[str, str]] = set()
+        for doc_id, nid, combined_score, fts_s, hop in walked_nodes:
             key = (doc_id, nid)
-            if key not in node_scores and fts_s > 0:
+            walked_set.add(key)
+            if key in node_scores:
+                # Node found by both FTS5 and Walk — structural confirmation bonus
+                walk_bonus = 0.15 * combined_score
+                node_scores[key] = node_scores[key] + walk_bonus
+            elif fts_s > 0:
+                # Walk-discovered node with some FTS5 signal
                 node_scores[key] = combined_score
+            elif plan and plan.terms and hop <= 3:
+                # Walk-only node (FTS5 = 0): inject if text contains query terms.
+                # Relaxed threshold (0.25) to catch more FTS5 blind spots in
+                # financial tables where terms are scattered across cells.
+                doc = doc_map.get(doc_id)
+                if doc:
+                    node = doc.get_node_by_id(nid)
+                    if node:
+                        text = (node.get("text", "") or "").lower()
+                        title = (node.get("title", "") or "").lower()
+                        full = title + " " + text
+                        if full.strip():
+                            hits = sum(1 for t in plan.terms if t in full)
+                            overlap = hits / len(plan.terms)
+                            if overlap >= 0.25:
+                                hop_decay = 1.0 - 0.2 * (hop - 1)  # hop 1→1.0, 2→0.8, 3→0.6
+                                inject_score = 0.25 * overlap * hop_decay
+                                node_scores[key] = inject_score
+
+        # 4. Parent context boost (key for financial docs)
+        # Core insight from diagnosis: 24/27 both-miss cases have relevant nodes
+        # with FTS5 scores in 0.15-0.60 range, but ranked too low (rank 9-78).
+        # Financial docs have the pattern: parent node (e.g., "Revenue") has high
+        # FTS5 score, but the *child* containing the actual number has lower score.
+        # This stage conditionally propagates parent relevance to children that
+        # also contain query terms (to avoid blindly boosting unrelated children).
+        if plan and plan.terms:
+            for doc_id, doc_scores in fts_score_map.items():
+                doc = doc_map.get(doc_id)
+                if not doc:
+                    continue
+                all_nodes = flatten_tree(doc.structure)
+                for node_dict in all_nodes:
+                    nid = node_dict.get("node_id", "")
+                    key = (doc_id, nid)
+                    current = node_scores.get(key, 0.0)
+                    if current < 0.01:
+                        continue
+
+                    # Only boost if the node itself contains query terms
+                    text = (node_dict.get("text", "") or "").lower()
+                    title = (node_dict.get("title", "") or "").lower()
+                    full_text = title + " " + text
+                    if not full_text.strip():
+                        continue
+                    hits = sum(1 for t in plan.terms if t in full_text)
+                    overlap = hits / len(plan.terms)
+                    if overlap < 0.25:
+                        continue  # Node doesn't contain enough query terms
+
+                    # 4a. Boost from parent: if parent has higher FTS5, child gets lifted
+                    pid = doc.get_parent_id(nid)
+                    if pid:
+                        parent_fts = doc_scores.get(pid, 0.0)
+                        if parent_fts > current * 1.2:
+                            parent_boost = 0.18 * parent_fts * overlap
+                            node_scores[key] = current + parent_boost
+
+                    # 4b. Sibling zone boost: if ≥2 siblings have FTS5 scores, this is
+                    # a relevant region (e.g., financial table with multiple matched rows)
+                    sibling_ids = doc.get_sibling_ids(nid)
+                    if sibling_ids:
+                        scored_siblings = [
+                            doc_scores.get(sid, 0.0)
+                            for sid in sibling_ids
+                            if doc_scores.get(sid, 0.0) > 0.05
+                        ]
+                        if len(scored_siblings) >= 2:
+                            avg_sibling = sum(scored_siblings) / len(scored_siblings)
+                            zone_boost = 0.08 * avg_sibling * overlap
+                            node_scores[key] = node_scores.get(key, current) + zone_boost
+
+        # 5. Term density boost: nodes with higher query term density get boosted.
+        # This reranks nodes based on how many unique query terms appear in the text,
+        # improving precision for multi-term queries (e.g., financial queries).
+        if plan and plan.terms and len(plan.terms) >= 2:
+            for (doc_id, nid), score in list(node_scores.items()):
+                if score < 0.01:
+                    continue
+                doc = doc_map.get(doc_id)
+                if not doc:
+                    continue
+                node = doc.get_node_by_id(nid)
+                if not node:
+                    continue
+                text = (node.get("text", "") or "").lower()
+                title = (node.get("title", "") or "").lower()
+                combined_text = title + " " + text
+                if not combined_text.strip():
+                    continue
+                # Count unique query terms present
+                hits = sum(1 for t in plan.terms if t in combined_text)
+                overlap = hits / len(plan.terms)
+                if overlap >= 0.5:
+                    # Boost nodes with high term coverage (lowered from 0.6 to 0.5)
+                    density_bonus = 0.12 * overlap * score
+                    node_scores[(doc_id, nid)] += density_bonus
 
         # Build flat node dicts
         flat_nodes: list[dict] = []

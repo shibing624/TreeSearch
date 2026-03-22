@@ -62,7 +62,7 @@ class TreeSearchConfig:
     fts_front_matter_weight: float = 2.0
 
     # Tree Search
-    search_mode: str = "flat"  # "flat" | "tree"
+    search_mode: str = "auto"  # "auto" | "flat" | "tree" | "auto" degrades to flat for code-only docs
     anchor_top_k: int = 5  # max anchor nodes per document
     max_anchor_per_doc: int = 3  # anchors to expand per document
     max_expansions: int = 40  # max total node expansions in tree walk

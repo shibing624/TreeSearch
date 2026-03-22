@@ -381,3 +381,35 @@ class TestSearchTreeMode:
         assert "flat_nodes" in result
         assert "query" in result
         assert result["query"] == "backend"
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_non_code_uses_tree(self, deep_tree_structure):
+        """Auto mode should resolve to tree for non-code documents."""
+        doc = Document(
+            doc_id="test", doc_name="Test Doc",
+            structure=deep_tree_structure,
+            source_type="markdown",
+        )
+        result = await search(
+            query="backend Python FastAPI",
+            documents=[doc],
+            search_mode="auto",
+        )
+        assert result["mode"] == "tree"
+        assert "paths" in result
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_code_uses_flat(self, deep_tree_structure):
+        """Auto mode should resolve to flat for code-only documents."""
+        doc = Document(
+            doc_id="test", doc_name="Test Doc",
+            structure=deep_tree_structure,
+            source_type="code",
+        )
+        result = await search(
+            query="backend Python FastAPI",
+            documents=[doc],
+            search_mode="auto",
+        )
+        assert result["mode"] == "flat"
+        assert "paths" not in result
