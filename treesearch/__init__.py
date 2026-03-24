@@ -13,7 +13,7 @@ Quick Start::
     ts = TreeSearch("./docs/")
     results = ts.search("How to configure voice calls?")
 """
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # ============================================================================
 # FTS5 Compatibility: Use pysqlite3 on systems without FTS5 support
@@ -79,20 +79,3 @@ __all__ = [
     # FTS5
     "FTS5Index",
 ]
-
-# Advanced APIs — import from submodules directly:
-#   from treesearch.indexer import code_to_tree, json_to_tree, jsonl_to_tree, csv_to_tree
-#   from treesearch.search import PreFilter
-#   from treesearch.fts import get_fts_index, set_fts_index, reset_fts_index
-#   from treesearch.tokenizer import tokenize
-#   from treesearch.tree import assign_node_ids, find_node, get_leaf_nodes, ...
-#   from treesearch.parsers import ParserRegistry, get_parser, extract_pdf_text
-
-# Framework integrations (optional — require extra dependencies):
-#   from treesearch.integrations.langchain import TreeSearchRetriever
-#   from treesearch.integrations.llamaindex import TreeSearchNodeRetriever
-#
-# Install extras:
-#   pip install pytreesearch[langchain]      # adds langchain-core
-#   pip install pytreesearch[llamaindex]     # adds llama-index-core
-#   pip install pytreesearch[integrations]   # both
