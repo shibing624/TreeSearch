@@ -250,6 +250,116 @@ class TreeSearch:
         return asyncio.run(self.asearch(query, **kwargs))
 
     # ------------------------------------------------------------------
+    # Batch search
+    # ------------------------------------------------------------------
+
+    async def abatch_search(self, queries: list[str], **kwargs) -> list[dict]:
+        """Async: Search for multiple queries in one call, sharing index initialisation.
+
+        Queries are executed concurrently via ``asyncio.gather``.  This is
+        significantly faster than calling ``asearch()`` in a loop because
+        document loading, FTS5 connection setup, and tree initialisation
+        happen only once, not once per query.
+
+        Args:
+            queries:  List of query strings.
+            **kwargs: Same keyword arguments accepted by ``asearch()``
+                      (top_k_docs, max_nodes_per_doc, search_mode, etc.).
+
+        Returns:
+            List of result dicts, in the **same order** as ``queries``.
+            Each element has the same shape as the dict returned by ``asearch()``.
+
+        Example::
+
+            ts = TreeSearch("docs/")
+            results = await ts.abatch_search(
+                ["authentication flow", "database schema", "rate limits"],
+                search_mode="tree",
+            )
+            for query, result in zip(queries, results):
+                print(query, len(result["flat_nodes"]))
+        """
+        if not queries:
+            return []
+
+        # Ensure documents are loaded once (not once per query)
+        if not self.documents and self._pending_paths:
+            if self.db_path and os.path.isfile(self.db_path):
+                from .fts import get_fts_index
+                fts = get_fts_index(db_path=self.db_path)
+                cached_docs = fts.load_all_documents()
+                stored_meta = fts.get_all_index_meta() if cached_docs else {}
+                if cached_docs:
+                    changed = self._get_changed_files(stored_meta=stored_meta)
+                    if not changed:
+                        self.documents = cached_docs
+                        self._pending_paths.clear()
+                    else:
+                        logger.info("Batch search: incremental re-index, %d file(s) changed", len(changed))
+                        await self.aindex(*changed)
+                        from .tree import load_documents
+                        self.documents = load_documents(self.db_path)
+                        self._pending_paths.clear()
+            if not self.documents and self._pending_paths:
+                await self.aindex(*self._pending_paths)
+                self._pending_paths.clear()
+
+        if not self.documents and self.db_path and os.path.isfile(self.db_path):
+            from .tree import load_documents
+            self.documents = load_documents(self.db_path)
+
+        if not self.documents:
+            raise ValueError(
+                "No documents available. Pass file paths to TreeSearch() or call index() first."
+            )
+
+        search_kwargs = {**self.kwargs, **kwargs}
+
+        # Run all queries concurrently — documents and FTS index are already warm
+        from .search import search as _search
+        tasks = [_search(q, self.documents, **search_kwargs) for q in queries]
+        results = await asyncio.gather(*tasks)
+        return list(results)
+
+    def batch_search(self, queries: list[str], **kwargs) -> list[dict]:
+        """Sync: Search for multiple queries in one call, sharing index initialisation.
+
+        This is the synchronous equivalent of ``abatch_search()``.  Use this
+        when you are not inside an async context.  If you already have a
+        running event loop (e.g. inside Jupyter), use ``await abatch_search()``
+        instead.
+
+        Args:
+            queries:  List of query strings.
+            **kwargs: Same keyword arguments accepted by ``search()``.
+
+        Returns:
+            List of result dicts, one per query, in the same order as ``queries``.
+
+        Example::
+
+            ts = TreeSearch("docs/")
+            ts.index()
+            all_results = ts.batch_search(
+                ["auth flow", "db schema"],
+                max_nodes_per_doc=5,
+            )
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                raise RuntimeError(
+                    "Event loop is already running. Please use `await abatch_search()` instead."
+                )
+        except RuntimeError as e:
+            if "Event loop is already running" in str(e):
+                raise
+            pass
+
+        return asyncio.run(self.abatch_search(queries, **kwargs))
+
+    # ------------------------------------------------------------------
     # File listing
     # ------------------------------------------------------------------
 

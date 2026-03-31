@@ -227,3 +227,7 @@ CODEBUDDY.md
 .workbuddy/
 docs/update.md
 examples/benchmark/data/financebench_pdfs/*
+docs/paper.md
+results/
+docs/exp*.md
+docs/v2.md

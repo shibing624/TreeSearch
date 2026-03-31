@@ -371,7 +371,7 @@ async def search(
 
     Returns:
         dict with 'documents' (list), 'query' (str), 'flat_nodes' (list),
-        and optionally 'paths' (list) when search_mode='tree'.
+        optionally 'paths' (list) when search_mode='tree'.
     """
     cfg = get_config()
 
@@ -431,22 +431,24 @@ async def search(
         effective_mode = _resolve_auto_mode(selected)
 
     if effective_mode == "tree" and scorer is not None:
-        return await _search_tree_mode(
+        result = await _search_tree_mode(
             query, selected, scorer, cfg,
             max_nodes_per_doc=max_nodes_per_doc,
             text_mode=text_mode,
             include_ancestors=include_ancestors,
             merge_strategy=merge_strategy,
         )
+        return result
 
     # Flat mode (original behavior, or auto-resolved from auto mode)
-    return await _search_flat_mode(
+    result = await _search_flat_mode(
         query, selected, scorer, cfg,
         max_nodes_per_doc=max_nodes_per_doc,
         text_mode=text_mode,
         include_ancestors=include_ancestors,
         merge_strategy=merge_strategy,
     )
+    return result
 
 
 async def _search_tree_mode(

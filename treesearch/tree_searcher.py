@@ -632,23 +632,22 @@ class TreeSearcher:
                     if overlap < 0.20:
                         continue  # Node doesn't contain enough query terms
 
-                    # 4a. Boost from parent: if parent has significantly higher FTS5,
-                    # child gets lifted. Use additive threshold (more sensitive than multiplicative).
+                    # 4a. Boost from parent: if parent has higher FTS5,
+                    # child gets lifted. Additive threshold ensures parent is meaningfully stronger.
                     pid = doc.get_parent_id(nid)
                     if pid:
                         parent_fts = doc_scores.get(pid, 0.0)
-                        # Additive threshold: parent must be at least 0.06 better
-                        if parent_fts > current + 0.06:
-                            parent_boost = 0.50 * parent_fts * overlap
+                        # Relaxed threshold: parent needs only slight edge
+                        if parent_fts > current + 0.02:
+                            parent_boost = 0.55 * parent_fts * overlap
                             node_scores[key] = current + parent_boost
 
-                    # 4b. Grandparent boost: if grandparent has very high FTS5, it strongly
-                    # indicates this subtree is relevant (e.g., section header with subsections)
+                    # 4b. Grandparent boost: strong signal that this subtree is relevant
                     grandparent_pid = doc.get_parent_id(pid) if pid else None
                     if grandparent_pid:
                         gp_fts = doc_scores.get(grandparent_pid, 0.0)
-                        if gp_fts > current + 0.10:
-                            gp_boost = 0.25 * gp_fts * overlap
+                        if gp_fts > current + 0.05:
+                            gp_boost = 0.30 * gp_fts * overlap
                             node_scores[key] = node_scores.get(key, current) + gp_boost
 
         # 5. Term density boost: nodes with higher query term density get boosted.
@@ -706,6 +705,29 @@ class TreeSearcher:
             if context > score * 1.5 and context > 0.15:
                 lift = 0.30 * (context - score)
                 node_scores[(doc_id, nid)] = score + lift
+
+        # 7. Title match boost: nodes whose title directly matches query terms
+        # get an additive bonus. This is critical for structured documents where
+        # section titles are highly descriptive (e.g., "Net Sales", "Methods").
+        if plan and plan.terms:
+            for (doc_id, nid), score in list(node_scores.items()):
+                if score < 0.01:
+                    continue
+                doc = doc_map.get(doc_id)
+                if not doc:
+                    continue
+                node = doc.get_node_by_id(nid)
+                if not node:
+                    continue
+                title = (node.get("title", "") or "").lower()
+                if not title:
+                    continue
+                title_hits = sum(1 for t in plan.terms if t in title)
+                if title_hits > 0:
+                    title_overlap = title_hits / len(plan.terms)
+                    # Additive bonus proportional to overlap and current score
+                    title_bonus = 0.15 * title_overlap * max(score, 0.10)
+                    node_scores[(doc_id, nid)] = score + title_bonus
 
         # Build flat node dicts
         flat_nodes: list[dict] = []

@@ -194,8 +194,10 @@ def score_anchor(
     # Depth penalty: deeper nodes are less ideal as anchors
     depth_penalty = min(depth / max(max_depth, 1), 1.0) * 0.10
 
-    # Title match bonus (smaller than before -- titles are often generic)
-    title_bonus = 0.08 if has_title_match else 0.0
+    # Title match bonus: query terms in node title strongly indicate relevance.
+    # Academic papers: section titles precisely describe content.
+    # Financial docs: titles like "Net Sales", "Operating Income" are highly discriminative.
+    title_bonus = 0.15 if has_title_match else 0.0
 
     # Phrase match bonus
     phrase_bonus = 0.07 if has_phrase_match else 0.0
