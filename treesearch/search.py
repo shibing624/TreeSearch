@@ -507,28 +507,43 @@ async def _search_tree_mode(
 
     merged = _merge_doc_results(doc_results, merge_strategy)
 
-    # Build flat_nodes with text and char limit
+    # Build flat_nodes: collect all candidates first, then apply per-node char budget.
+    # Strategy: sort by score globally, then truncate text per-node so high-rank nodes
+    # from any document are never dropped in favor of lower-rank nodes that happen to
+    # appear earlier in the doc list.
     max_result_chars = cfg.max_result_chars
-    flat_nodes = []
-    total_chars = 0
+    all_candidates = []
     for doc_result in merged:
         for node in doc_result.get("nodes", []):
-            node_text = node.get("text", "")
-            if max_result_chars and total_chars + len(node_text) > max_result_chars and flat_nodes:
-                break
-            flat_nodes.append({
+            all_candidates.append({
                 "node_id": node.get("node_id", ""),
                 "doc_id": doc_result.get("doc_id", ""),
                 "doc_name": doc_result.get("doc_name", ""),
                 "title": node.get("title", ""),
                 "score": node.get("score", 0),
-                "text": node_text,
+                "text": node.get("text", ""),
             })
-            total_chars += len(node_text)
-        else:
-            continue
-        break
-    flat_nodes.sort(key=lambda x: (-x["score"], x["node_id"]))
+    all_candidates.sort(key=lambda x: (-x["score"], x["node_id"]))
+
+    # Apply char budget: budget is distributed per-node (not first-come-first-served).
+    # Each node gets at most (remaining_budget / remaining_nodes) chars so that all
+    # high-rank nodes appear in the output, possibly truncated rather than dropped.
+    flat_nodes = []
+    if max_result_chars and all_candidates:
+        remaining_budget = max_result_chars
+        n = len(all_candidates)
+        for i, node in enumerate(all_candidates):
+            if remaining_budget <= 0:
+                flat_nodes.append({**node, "text": ""})
+                continue
+            per_node_limit = max(remaining_budget // (n - i), 1)
+            text = node["text"]
+            if len(text) > per_node_limit:
+                text = text[:per_node_limit]
+            flat_nodes.append({**node, "text": text})
+            remaining_budget -= len(text)
+    else:
+        flat_nodes = all_candidates
 
     # Serialize paths for output
     serialized_paths = []
@@ -586,27 +601,38 @@ async def _search_flat_mode(
 
     merged = _merge_doc_results(doc_results, merge_strategy)
 
+    # Build flat_nodes: collect all candidates first, then apply per-node char budget.
+    # See _search_tree_mode for strategy rationale.
     max_result_chars = cfg.max_result_chars
-    flat_nodes = []
-    total_chars = 0
+    all_candidates = []
     for doc_result in merged:
         for node in doc_result.get("nodes", []):
-            node_text = node.get("text", "")
-            if max_result_chars and total_chars + len(node_text) > max_result_chars and flat_nodes:
-                break
-            flat_nodes.append({
+            all_candidates.append({
                 "node_id": node.get("node_id", ""),
                 "doc_id": doc_result.get("doc_id", ""),
                 "doc_name": doc_result.get("doc_name", ""),
                 "title": node.get("title", ""),
                 "score": node.get("score", 0),
-                "text": node_text,
+                "text": node.get("text", ""),
             })
-            total_chars += len(node_text)
-        else:
-            continue
-        break
-    flat_nodes.sort(key=lambda x: (-x["score"], x["node_id"]))
+    all_candidates.sort(key=lambda x: (-x["score"], x["node_id"]))
+
+    flat_nodes = []
+    if max_result_chars and all_candidates:
+        remaining_budget = max_result_chars
+        n = len(all_candidates)
+        for i, node in enumerate(all_candidates):
+            if remaining_budget <= 0:
+                flat_nodes.append({**node, "text": ""})
+                continue
+            per_node_limit = max(remaining_budget // (n - i), 1)
+            text = node["text"]
+            if len(text) > per_node_limit:
+                text = text[:per_node_limit]
+            flat_nodes.append({**node, "text": text})
+            remaining_budget -= len(text)
+    else:
+        flat_nodes = all_candidates
 
     return {
         "documents": merged,

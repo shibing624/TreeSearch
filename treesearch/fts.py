@@ -801,7 +801,7 @@ class FTS5Index:
                 WHERE fts_nodes MATCH ?
                   AND f.doc_id IN ({placeholders})
                 ORDER BY rank_score
-                LIMIT 2000
+                LIMIT 10000
             """
             params = (match_expr, *doc_ids)
         else:
@@ -811,7 +811,7 @@ class FTS5Index:
                 FROM fts_nodes f
                 WHERE fts_nodes MATCH ?
                 ORDER BY rank_score
-                LIMIT 2000
+                LIMIT 10000
             """
             params = (match_expr,)
 
