@@ -442,17 +442,13 @@ async def _evaluate_sample(
                 from treesearch.fts import FTS5Index
                 fts_index = FTS5Index()
                 fts_index.index_documents(documents)
-            all_scored: list[tuple[str, float]] = []
             target_docs = documents
             if sample.doc_id:
                 matched = [d for d in documents if sample.doc_id in d.doc_id or sample.doc_id in d.doc_name]
                 if matched:
                     target_docs = matched
-            for doc in target_docs:
-                node_scores = fts_index.score_nodes(sample.question, doc.doc_id)
-                all_scored.extend(node_scores.items())
-            all_scored.sort(key=lambda x: -x[1])
-            retrieved_node_ids = [nid for nid, _ in all_scored[:top_k]]
+            doc_ids = [doc.doc_id for doc in target_docs]
+            retrieved_node_ids = fts_index.ranked_node_ids(sample.question, doc_ids=doc_ids, top_k=top_k)
         elif strategy == "tree":
             # Tree mode: anchor retrieval -> tree walk -> path aggregation
             fts_index = cached_indexes.get("fts5")
@@ -460,22 +456,42 @@ async def _evaluate_sample(
                 from treesearch.fts import FTS5Index
                 fts_index = FTS5Index()
                 fts_index.index_documents(documents)
-            # Reuse cached TreeSearcher (built once per strategy in _build_cached_indexes)
             searcher = cached_indexes.get("tree_searcher")
             if searcher is None:
-                searcher = TreeSearcher()
+                searcher = TreeSearcher(fts_index=fts_index)
+            elif searcher._fts_index is None:
+                searcher._fts_index = fts_index
             target_docs = documents
             if sample.doc_id:
                 matched = [d for d in documents if sample.doc_id in d.doc_id or sample.doc_id in d.doc_name]
                 if matched:
                     target_docs = matched
-            fts_score_map: dict[str, dict[str, float]] = {}
-            for doc in target_docs:
-                scores = fts_index.score_nodes(sample.question, doc.doc_id)
-                if scores:
-                    fts_score_map[doc.doc_id] = scores
-            paths, flat_nodes = searcher.search(sample.question, target_docs, fts_score_map)
+            _, flat_nodes = searcher.search(sample.question, target_docs)
             retrieved_node_ids = [fn["node_id"] for fn in flat_nodes[:top_k]]
+        elif strategy == "auto":
+            # Auto mode: use cached FTS5 index and let search() pick flat vs tree
+            fts_index = cached_indexes.get("fts5")
+            if fts_index is None:
+                from treesearch.fts import FTS5Index
+                fts_index = FTS5Index()
+                fts_index.index_documents(documents)
+            target_docs = documents
+            if sample.doc_id:
+                matched = [d for d in documents if sample.doc_id in d.doc_id or sample.doc_id in d.doc_name]
+                if matched:
+                    target_docs = matched
+            # Resolve mode once, dispatch directly to avoid search() pipeline overhead
+            from treesearch.search import _resolve_auto_mode
+            effective_mode = _resolve_auto_mode(target_docs)
+            if effective_mode == "tree":
+                searcher = cached_indexes.get("tree_searcher")
+                if searcher is None:
+                    searcher = TreeSearcher(fts_index=fts_index)
+                _, flat_nodes = searcher.search(sample.question, target_docs)
+                retrieved_node_ids = [fn["node_id"] for fn in flat_nodes[:top_k]]
+            else:
+                doc_ids = [doc.doc_id for doc in target_docs]
+                retrieved_node_ids = fts_index.ranked_node_ids(sample.question, doc_ids=doc_ids, top_k=top_k)
         else:
             result = await search(
                 query=sample.question,
@@ -520,14 +536,14 @@ def _build_cached_indexes(
     """
     indexes = dict(shared_indexes) if shared_indexes else {}
 
-    if strategy in ("fts5", "tree") and "fts5" not in indexes:
+    if strategy in ("fts5", "tree", "auto") and "fts5" not in indexes:
         from treesearch.fts import FTS5Index
         fts_index = FTS5Index()
         fts_index.index_documents(documents)
         indexes["fts5"] = fts_index
         logger.info("Pre-built FTS5 index for %d documents", len(documents))
 
-    if strategy == "tree" and "tree_searcher" not in indexes:
+    if strategy in ("tree", "auto") and "tree_searcher" not in indexes:
         from treesearch.config import get_config, set_config, TreeSearchConfig
         # Set wider config for benchmark before creating searcher
         old_cfg = get_config()
@@ -623,7 +639,7 @@ async def run_benchmark(
                 print(f"  [{i+1}/{len(samples)}] MRR={m.get('mrr', 0):.2f} "
                       f"P@3={m.get('precision@3', 0):.2f} R@3={m.get('recall@3', 0):.2f} "
                       f"[{hit}] LLM={result.cost.llm_calls} "
-                      f"{result.cost.latency_seconds:.1f}s")
+                      f"{result.cost.latency_seconds:.4f}s")
             else:
                 print(f"  [{i+1}/{len(samples)}] Skipped (no ground truth)")
 
@@ -752,7 +768,7 @@ async def run_benchmark_with_samples(
                 print(f"  [{i+1}/{len(samples)}] MRR={m.get('mrr', 0):.2f} "
                       f"P@3={m.get('precision@3', 0):.2f} R@3={m.get('recall@3', 0):.2f} "
                       f"[{hit}] LLM={result.cost.llm_calls} "
-                      f"{result.cost.latency_seconds:.1f}s")
+                      f"{result.cost.latency_seconds:.4f}s")
             else:
                 print(f"  [{i+1}/{len(samples)}] Skipped (no ground truth)")
 
@@ -837,13 +853,13 @@ def print_report(report: BenchmarkReport) -> None:
     cost = report.avg_cost
     print(f"  {'LLM calls':<20} {cost.llm_calls}")
     print(f"  {'Total tokens':<20} {cost.total_tokens}")
-    print(f"  {'Latency (s)':<20} {cost.latency_seconds:.2f}")
+    print(f"  {'Latency (s)':<20} {cost.latency_seconds:.4f}")
 
     print("\nCost (total):")
     tc = report.total_cost
     print(f"  {'LLM calls':<20} {tc.llm_calls}")
     print(f"  {'Total tokens':<20} {tc.total_tokens}")
-    print(f"  {'Latency (s)':<20} {tc.latency_seconds:.2f}")
+    print(f"  {'Latency (s)':<20} {tc.latency_seconds:.4f}")
 
     if report.per_type_metrics:
         print("\nPer question-type breakdown:")
@@ -886,7 +902,7 @@ def print_comparison(reports: list[BenchmarkReport]) -> None:
         for r in reports:
             val = getattr(r.avg_cost, cf, 0)
             if isinstance(val, float):
-                row += f"{val:>15.2f}"
+                row += f"{val:>15.4f}"
             else:
                 row += f"{val:>15}"
         print(row)
@@ -897,7 +913,7 @@ def print_comparison(reports: list[BenchmarkReport]) -> None:
         for r in reports:
             val = getattr(r.total_cost, cf, 0)
             if isinstance(val, float):
-                row += f"{val:>15.2f}"
+                row += f"{val:>15.4f}"
             else:
                 row += f"{val:>15}"
         print(row)

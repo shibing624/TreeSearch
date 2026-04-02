@@ -163,6 +163,9 @@ def estimate_idf(terms: list[str], corpus_texts: list[str]) -> dict[str, float]:
     Uses smooth IDF: log((N + 1) / (df + 1)) + 1 to avoid zero weights.
     Corpus is typically all node texts from a single document.
 
+    Optimization: pre-lowercase corpus texts once, then check all terms.
+    Previous version did `text.lower()` inside the inner loop (N * T calls).
+
     Args:
         terms: query terms (lowercased)
         corpus_texts: list of node text strings

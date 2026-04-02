@@ -32,16 +32,14 @@ Usage:
     # Evaluate on all 150 samples with FTS5 (downloads PDFs automatically, skips existing):
     python examples/benchmark/financebench_benchmark.py --max-samples 150
 
-    # Quick test with 20 samples:
-    python examples/benchmark/financebench_benchmark.py --max-samples 20
-
     # Compare with embedding retrieval:
     python examples/benchmark/financebench_benchmark.py --max-samples 50 --with-embedding
 
   📊 SUMMARY (FinanceBench (SEC Filings))
   ──────────────────────────────────────────────────
-  TREESEARCH_FTS5          MRR=0.3969  R@5=0.2773  ⏱ 0.0165s/q  (50/50 valid)
-  TREESEARCH_TREE          MRR=0.3415  R@5=0.2834  ⏱ 0.0482s/q  (50/50 valid)
+  TREESEARCH_FTS5          MRR=0.2420  R@5=0.2067  ⏱ 0.0073s/q  (50/50 valid)
+  TREESEARCH_TREE          MRR=0.2512  R@5=0.2344  ⏱ 0.0254s/q  (50/50 valid)
+  TREESEARCH_AUTO          MRR=0.2420  R@5=0.2067  ⏱ 0.0058s/q  (50/50 valid)
   
 """
 import asyncio
@@ -702,17 +700,13 @@ def evaluate_fts5(
     for i, sample in enumerate(samples):
         tracker = CostTracker()
         with tracker:
-            all_scored: list[tuple[str, float]] = []
             target_docs = documents
             if sample.doc_id:
                 matched = [d for d in documents if sample.doc_id in d.doc_id or sample.doc_id in d.doc_name]
                 if matched:
                     target_docs = matched
-            for doc in target_docs:
-                node_scores = fts_index.score_nodes(sample.question, doc.doc_id)
-                all_scored.extend(node_scores.items())
-            all_scored.sort(key=lambda x: -x[1])
-            retrieved_node_ids = [nid for nid, _ in all_scored[:max(k_values)]]
+            doc_ids = [doc.doc_id for doc in target_docs]
+            retrieved_node_ids = fts_index.ranked_node_ids(sample.question, doc_ids=doc_ids, top_k=max(k_values))
 
         relevant_node_ids = resolve_relevant_nodes(sample, documents)
         has_evidence = bool(sample.evidence_texts and any(e for e in sample.evidence_texts))
@@ -780,6 +774,7 @@ def evaluate_tree(
 
     all_results = []
     cost_stats = []
+    searcher = TreeSearcher(fts_index=fts_index)
 
     for i, sample in enumerate(samples):
         tracker = CostTracker()
@@ -789,13 +784,8 @@ def evaluate_tree(
                 matched = [d for d in documents if sample.doc_id in d.doc_id or sample.doc_id in d.doc_name]
                 if matched:
                     target_docs = matched
-            fts_score_map: dict[str, dict[str, float]] = {}
-            for doc in target_docs:
-                scores = fts_index.score_nodes(sample.question, doc.doc_id)
-                if scores:
-                    fts_score_map[doc.doc_id] = scores
-            searcher = TreeSearcher()
-            paths, flat_nodes = searcher.search(sample.question, target_docs, fts_score_map)
+            # Let TreeSearcher handle FTS5 scoring internally (batch, single SQL)
+            paths, flat_nodes = searcher.search(sample.question, target_docs)
             retrieved_node_ids = [fn["node_id"] for fn in flat_nodes[:max(k_values)]]
 
         relevant_node_ids = resolve_relevant_nodes(sample, documents)
@@ -834,6 +824,88 @@ def evaluate_tree(
 
     avg_metrics["total_queries"] = len(samples)
     avg_metrics["valid_queries"] = len(valid)
+
+    return avg_metrics, all_results
+
+
+def evaluate_auto(
+    samples: list[BenchmarkSample],
+    documents: list[Document],
+    k_values: list[int],
+) -> tuple[dict, list[dict]]:
+    """Evaluate auto mode on FinanceBench samples.
+
+    Uses _resolve_auto_mode to pick flat vs tree per document set,
+    then dispatches directly to the fast retrieval path (no search() overhead).
+    """
+    from treesearch.search import _resolve_auto_mode
+
+    # Build shared index once
+    fts_index = FTS5Index()
+    fts_index.index_documents(documents)
+
+    # Resolve mode once (all FinanceBench docs have same source_type)
+    effective_mode = _resolve_auto_mode(documents)
+
+    # Build tree searcher if needed
+    tree_searcher = None
+    if effective_mode == "tree":
+        from treesearch.tree_searcher import TreeSearcher
+        from treesearch.config import set_config as _set_cfg, get_config as _get_cfg, TreeSearchConfig as _TSCfg
+        _old = _get_cfg()
+        _set_cfg(_TSCfg(
+            path_top_k=max(max(k_values), _old.path_top_k),
+            anchor_top_k=max(max(k_values), _old.anchor_top_k),
+            max_expansions=max(60, _old.max_expansions),
+        ))
+        tree_searcher = TreeSearcher(fts_index=fts_index)
+
+    all_results = []
+    cost_stats = []
+
+    for i, sample in enumerate(samples):
+        tracker = CostTracker()
+        with tracker:
+            target_docs = documents
+            if sample.doc_id:
+                matched = [d for d in documents if sample.doc_id in d.doc_id or sample.doc_id in d.doc_name]
+                if matched:
+                    target_docs = matched
+
+            if effective_mode == "tree" and tree_searcher:
+                _, flat_nodes = tree_searcher.search(sample.question, target_docs)
+                retrieved_node_ids = [fn["node_id"] for fn in flat_nodes[:max(k_values)]]
+            else:
+                doc_ids = [doc.doc_id for doc in target_docs]
+                retrieved_node_ids = fts_index.ranked_node_ids(sample.question, doc_ids=doc_ids, top_k=max(k_values))
+
+        relevant_node_ids = resolve_relevant_nodes(sample, documents)
+        has_evidence = bool(sample.evidence_texts and any(e for e in sample.evidence_texts))
+        if has_evidence:
+            metrics = evaluate_query(retrieved_node_ids, relevant_node_ids, k_values) if relevant_node_ids else evaluate_query(retrieved_node_ids, ["__no_match__"], k_values)
+        else:
+            metrics = {}
+
+        if not has_evidence:
+            print(f"  [{i + 1}/{len(samples)}] Skipped (no evidence)")
+        else:
+            hit = "HIT" if metrics.get("hit@5", 0) > 0 else "miss"
+            print(f"  [{i + 1}/{len(samples)}] MRR={metrics.get('mrr', 0):.2f} "
+                  f"P@3={metrics.get('precision@3', 0):.2f} R@5={metrics.get('recall@5', 0):.2f} "
+                  f"[{hit}] {tracker.stats.latency_seconds:.3f}s")
+
+        all_results.append({"metrics": metrics, "cost": tracker.stats})
+        cost_stats.append(tracker.stats)
+
+    valid = [r for r in all_results if r["metrics"]]
+    avg_metrics = {}
+    if valid:
+        for key in valid[0]["metrics"]:
+            avg_metrics[key] = sum(r["metrics"].get(key, 0) for r in valid) / len(valid)
+        avg_cost = aggregate_cost_stats([r["cost"] for r in valid])
+        avg_metrics["avg_query_time"] = avg_cost.latency_seconds
+    avg_metrics["valid_queries"] = len(valid)
+    avg_metrics["total_queries"] = len(samples)
 
     return avg_metrics, all_results
 
@@ -1031,30 +1103,41 @@ def print_results(
         print(f"  {name.upper():<24} MRR={mrr_val:.4f}  R@5={r5_val:.4f}  "
               f"⏱ {qt_val:.4f}s/q  ({valid}/{total} valid)")
 
-    # Cross comparison
-    if len(results) == 2:
+    # Cross comparison: find best method and compare with others
+    if len(results) >= 2:
         names = list(results.keys())
-        m0, m1 = results[names[0]], results[names[1]]
-        mrr0, mrr1 = m0.get("mrr", 0), m1.get("mrr", 0)
-        r5_0, r5_1 = m0.get("recall@5", 0), m1.get("recall@5", 0)
-        qt0, qt1 = m0.get("avg_query_time", 0), m1.get("avg_query_time", 0)
+        # Find best by MRR
+        best_name = max(names, key=lambda n: results[n].get("mrr", 0))
+        best_m = results[best_name]
+        best_mrr = best_m.get("mrr", 0)
+        best_r5 = best_m.get("recall@5", 0)
+        best_qt = best_m.get("avg_query_time", 0)
 
         print()
-        if mrr1 > mrr0:
-            print(f"  ✅ {names[1].upper()} outperforms {names[0].upper()} by {(mrr1 - mrr0) / mrr0 * 100:.1f}% on MRR")
-        elif mrr0 > mrr1:
-            print(f"  📊 {names[0].upper()} outperforms {names[1].upper()} by {(mrr0 - mrr1) / mrr1 * 100:.1f}% on MRR")
+        print(f"  🏆 Best overall: {best_name.upper()} (MRR={best_mrr:.4f}, R@5={best_r5:.4f})")
 
-        if r5_1 > r5_0:
-            print(f"  ✅ {names[1].upper()} outperforms {names[0].upper()} by {(r5_1 - r5_0) / r5_0 * 100:.1f}% on Recall@5")
-        elif r5_0 > r5_1:
-            print(f"  📊 {names[0].upper()} outperforms {names[1].upper()} by {(r5_0 - r5_1) / r5_1 * 100:.1f}% on Recall@5")
+        # Compare each other method with the best
+        for name in names:
+            if name == best_name:
+                continue
+            m = results[name]
+            mrr = m.get("mrr", 0)
+            r5 = m.get("recall@5", 0)
+            qt = m.get("avg_query_time", 0)
 
-        if qt0 > 0 and qt1 > 0:
-            if qt0 > qt1:
-                print(f"  ⚡ {names[1].upper()} is {qt0 / qt1:.1f}x faster per query")
-            else:
-                print(f"  ⚡ {names[0].upper()} is {qt1 / qt0:.1f}x faster per query")
+            if best_mrr > 0 and mrr > 0:
+                mrr_diff = (best_mrr - mrr) / mrr * 100
+                print(f"  📊 {best_name.upper()} outperforms {name.upper()} by {mrr_diff:.1f}% on MRR")
+
+            if best_r5 > 0 and r5 > 0:
+                r5_diff = (best_r5 - r5) / r5 * 100
+                print(f"  📊 {best_name.upper()} outperforms {name.upper()} by {r5_diff:.1f}% on Recall@5")
+
+            if qt > 0 and best_qt > 0:
+                if qt < best_qt:
+                    print(f"  ⚡ {name.upper()} is {best_qt / qt:.1f}x faster per query")
+                else:
+                    print(f"  ⚡ {best_name.upper()} is {qt / best_qt:.1f}x faster per query")
 
     # Per-type breakdown
     if fts_per_type:
@@ -1077,7 +1160,7 @@ async def main():
     parser = argparse.ArgumentParser(
         description="FinanceBench benchmark: evaluate TreeSearch on financial document QA"
     )
-    parser.add_argument("--max-samples", type=int, default=150, help="Max QA samples to evaluate")
+    parser.add_argument("--max-samples", type=int, default=50, help="Max QA samples to evaluate")
     parser.add_argument("--top-k", type=int, default=10, help="Top-K results per query")
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     parser.add_argument("--output-dir", type=str, default=os.path.join(_script_dir, "benchmark_results", "financebench"), help="Output directory")
@@ -1155,9 +1238,18 @@ async def main():
     tree_metrics["index_time"] = index_time
     tree_per_type = compute_per_type_metrics(tree_results)
 
+    # Step 4c: Evaluate Auto mode
+    print(f"\n{'=' * 60}")
+    print(f"Strategy: TREESEARCH AUTO (auto routing) | Samples: {len(benchmark_samples)}")
+    print(f"{'=' * 60}")
+
+    auto_metrics, auto_results = evaluate_auto(benchmark_samples, documents, k_values)
+    auto_metrics["index_time"] = index_time
+
     all_results = {
         "treesearch_fts5": fts_metrics,
         "treesearch_tree": tree_metrics,
+        "treesearch_auto": auto_metrics,
     }
     extra_info = {
         "treesearch_fts5": {
@@ -1169,6 +1261,11 @@ async def main():
             "index_time": index_time,
             "num_items": total_nodes,
             "avg_query_time": tree_metrics.get("avg_query_time", 0),
+        },
+        "treesearch_auto": {
+            "index_time": index_time,
+            "num_items": total_nodes,
+            "avg_query_time": auto_metrics.get("avg_query_time", 0),
         },
     }
 

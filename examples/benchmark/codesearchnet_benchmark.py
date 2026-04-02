@@ -29,10 +29,12 @@ Usage:
     # Compare with embedding
     python examples/benchmark/codesearchnet_benchmark.py --with-embedding --max-samples 50
 
+
   📊 SUMMARY (CodeSearchNet (PYTHON))
   ──────────────────────────────────────────────────
-  TREESEARCH_FTS5          MRR=0.8400  R@5=0.8600  ⏱ 0.0017s/q
-  TREESEARCH_TREE          MRR=0.0029  R@5=0.0000  ⏱ 1.3824s/q
+  TREESEARCH_FTS5          MRR=0.9050  R@5=0.9200  ⏱ 0.0045s/q
+  TREESEARCH_TREE          MRR=0.2833  R@5=0.3000  ⏱ 0.0302s/q
+  TREESEARCH_AUTO          MRR=0.9100  R@5=0.9200  ⏱ 0.0045s/q
   EMBEDDING                MRR=0.8483  R@5=0.9400  ⏱ 0.1660s/q
 """
 import asyncio
@@ -415,20 +417,14 @@ class TreeSearchCodeTreeIndex:
         from treesearch.tree_searcher import TreeSearcher
         from treesearch.config import set_config, get_config, TreeSearchConfig
 
-        fts_score_map: dict[str, dict[str, float]] = {}
-        for doc in self.base.documents:
-            scores = self.base.fts_index.score_nodes(query, doc.doc_id)
-            if scores:
-                fts_score_map[doc.doc_id] = scores
-
         old_cfg = get_config()
         set_config(TreeSearchConfig(
             path_top_k=max(top_k, old_cfg.path_top_k),
             anchor_top_k=max(top_k, old_cfg.anchor_top_k),
             max_expansions=max(60, old_cfg.max_expansions),
         ))
-        searcher = TreeSearcher()
-        paths, flat_nodes = searcher.search(query, self.base.documents, fts_score_map)
+        searcher = TreeSearcher(fts_index=self.base.fts_index)
+        _, flat_nodes = searcher.search(query, self.base.documents)
         set_config(old_cfg)
 
         # Map flat_nodes back to corpus idx
@@ -448,6 +444,28 @@ class TreeSearchCodeTreeIndex:
                 pass
 
         return output
+
+
+class TreeSearchCodeAutoIndex:
+    """Auto mode: uses _resolve_auto_mode to pick flat vs tree,
+    then dispatches to the appropriate retriever. Avoids the overhead
+    of asyncio.run() per query and redundant FTS5 routing queries."""
+
+    def __init__(self, base_index: TreeSearchCodeIndex):
+        self.base: TreeSearchCodeIndex = base_index
+        # Resolve mode once (all docs have the same source_type)
+        from treesearch.search import _resolve_auto_mode
+        self._mode = _resolve_auto_mode(base_index.documents)
+        logger.info(f"Auto mode resolved to: {self._mode}")
+
+        if self._mode == "tree":
+            self._tree_index = TreeSearchCodeTreeIndex(base_index)
+
+    def search(self, query: str, top_k: int = 10) -> list[tuple[int, float]]:
+        if self._mode == "tree":
+            return self._tree_index.search(query, top_k)
+        else:
+            return self.base.search(query, top_k)
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +585,17 @@ async def main():
     tree_metrics["index_time"] = ts_index_time  # same index
     tree_metrics["num_nodes"] = ts_metrics["num_nodes"]
     results["treesearch_tree"] = tree_metrics
+
+    # Auto mode evaluation (uses treesearch.search with search_mode="auto")
+    print(f"\n{'=' * 60}")
+    print("Strategy: TREESEARCH AUTO (auto routing)")
+    print(f"{'=' * 60}")
+
+    auto_index = TreeSearchCodeAutoIndex(ts_index)
+    auto_metrics = evaluate_retrieval(query_samples, auto_index)
+    auto_metrics["index_time"] = ts_index_time
+    auto_metrics["num_nodes"] = ts_metrics["num_nodes"]
+    results["treesearch_auto"] = auto_metrics
 
     # Embedding evaluation (optional)
     if args.with_embedding:

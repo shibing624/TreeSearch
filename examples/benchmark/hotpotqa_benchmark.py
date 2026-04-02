@@ -25,12 +25,14 @@ Usage:
   python examples/benchmark/hotpotqa_benchmark.py --max-samples 500 --strategies fts5 tree
 
 
-  HOTPOTQA BENCHMARK RESULTS
+HOTPOTQA BENCHMARK RESULTS
 ======================================================================
 Strategy                 MRR    SP-Rec@3    2hop-Cov@3    SP-Rec@5    2hop-Cov@5   SP-Rec@10   2hop-Cov@10     Latency
 ----------------------------------------------------------------------
-fts5                  1.0000      1.0000        1.0000      1.0000        1.0000      1.0000        1.0000      0.015s
-tree                  0.9056      0.9762        0.9762      1.0000        1.0000      1.0000        1.0000      0.005s
+fts5                  0.9712      0.9939        0.9939      1.0000        1.0000      1.0000        1.0000      0.006s
+tree                  0.9115      0.9879        0.9879      1.0000        1.0000      1.0000        1.0000      0.003s
+auto                  1.0000      1.0000        1.0000      1.0000        1.0000      1.0000        1.0000      0.013s
+======================================================================
 
 ======================================================================
 FINANCEBENCH END-TO-END RAG EVALUATION
@@ -325,12 +327,8 @@ def _retrieve_flat(
     top_k: int,
 ) -> list[str]:
     """FTS5 flat retrieval: score all nodes, return top-k by score."""
-    all_scored: list[tuple[str, float]] = []
-    for doc in documents:
-        scores = fts_index.score_nodes(question, doc.doc_id)
-        all_scored.extend(scores.items())
-    all_scored.sort(key=lambda x: -x[1])
-    return [nid for nid, _ in all_scored[:top_k]]
+    doc_ids = [doc.doc_id for doc in documents]
+    return fts_index.ranked_node_ids(question, doc_ids=doc_ids, top_k=top_k)
 
 
 def _retrieve_tree(
@@ -341,12 +339,27 @@ def _retrieve_tree(
     top_k: int,
 ) -> list[str]:
     """Tree mode retrieval: anchor -> walk -> path aggregation."""
-    fts_score_map: dict[str, dict[str, float]] = {}
-    for doc in documents:
-        scores = fts_index.score_nodes(question, doc.doc_id)
-        if scores:
-            fts_score_map[doc.doc_id] = scores
-    _, flat_nodes = searcher.search(question, documents, fts_score_map)
+    # Use the per-sample fts_index for scoring (hotpotqa builds one per sample)
+    searcher._fts_index = fts_index
+    _, flat_nodes = searcher.search(question, documents)
+    return [fn["node_id"] for fn in flat_nodes[:top_k]]
+
+
+def _retrieve_auto(
+    question: str,
+    documents: list[Document],
+    top_k: int,
+) -> list[str]:
+    """Auto mode: let treesearch.search() pick flat vs tree."""
+    from treesearch.search import search as ts_search
+    result = asyncio.run(ts_search(
+        query=question,
+        documents=documents,
+        search_mode="auto",
+        max_nodes_per_doc=top_k,
+        text_mode="none",
+    ))
+    flat_nodes = result.get("flat_nodes", [])
     return [fn["node_id"] for fn in flat_nodes[:top_k]]
 
 
@@ -378,6 +391,8 @@ def evaluate_sample(
     max_k = max(k_values)
     if strategy == "tree" and searcher is not None:
         retrieved = _retrieve_tree(sample.question, documents, fts_index_local, searcher, max_k)
+    elif strategy == "auto":
+        retrieved = _retrieve_auto(sample.question, documents, max_k)
     else:
         retrieved = _retrieve_flat(sample.question, documents, fts_index_local, max_k)
 
@@ -533,8 +548,8 @@ def main():
                         help="HotpotQA split to use")
     parser.add_argument("--max-samples", type=int, default=200,
                         help="Max number of questions to evaluate")
-    parser.add_argument("--strategies", nargs="+", default=["fts5", "tree"],
-                        choices=["fts5", "tree"],
+    parser.add_argument("--strategies", nargs="+", default=["fts5", "tree", "auto"],
+                        choices=["fts5", "tree", "auto"],
                         help="Retrieval strategies to compare")
     parser.add_argument("--k-values", nargs="+", type=int, default=[1, 3, 5, 10],
                         help="K values for @K metrics")

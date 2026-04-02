@@ -393,6 +393,77 @@ async def search(
         unindexed = fts_index.get_unindexed_doc_ids(list(doc_map.keys()))
         for doc_id in unindexed:
             fts_index.index_document(doc_map[doc_id])
+
+        # Fast path for tree mode: use score_nodes_batch without doc filter
+        # to get both routing AND scoring in a single FTS5 query, avoiding
+        # the separate search_with_aggregation call (saves ~2.5ms/query).
+        if (search_mode == "tree" or (search_mode == "auto" and documents)) and pre_filter is None:
+            # Check if any doc needs grep (code source types)
+            from .parsers import get_prefilters_for_source_type
+            use_grep = any(
+                "grep" in get_prefilters_for_source_type(doc.source_type or "text")
+                for doc in documents
+            )
+            if not use_grep:
+                weights = {
+                    "title": cfg.fts_title_weight,
+                    "summary": cfg.fts_summary_weight,
+                    "body": cfg.fts_body_weight,
+                    "code_blocks": cfg.fts_code_weight,
+                    "front_matter": cfg.fts_front_matter_weight,
+                }
+                scorer_fts = get_fts_index(db_path=cfg.fts_db_path or None, weights=weights)
+                # Batch score ALL docs in one SQL query (no doc_id filter)
+                all_doc_ids = list(doc_map.keys())
+                all_scores = scorer_fts.score_nodes_batch(query, doc_ids=all_doc_ids)
+
+                # Derive routing from batch results: rank docs by max node score
+                doc_max_scores = []
+                for did, nscores in all_scores.items():
+                    if nscores:
+                        doc_max_scores.append((did, max(nscores.values())))
+                doc_max_scores.sort(key=lambda x: -x[1])
+                routed_ids = {did for did, _ in doc_max_scores[:top_k_docs]}
+
+                if routed_ids:
+                    selected = [d for d in documents if d.doc_id in routed_ids]
+                else:
+                    selected = documents[:top_k_docs]
+
+                # Resolve mode
+                effective_mode = search_mode
+                if search_mode == "auto" and selected:
+                    effective_mode = _resolve_auto_mode(selected)
+
+                if effective_mode == "tree":
+                    # Filter score map to selected docs only
+                    fts_score_map = {did: all_scores[did] for did in routed_ids if did in all_scores}
+                    result = await _search_tree_mode(
+                        query, selected, scorer_fts, cfg,
+                        max_nodes_per_doc=max_nodes_per_doc,
+                        text_mode=text_mode,
+                        include_ancestors=include_ancestors,
+                        merge_strategy=merge_strategy,
+                        fts_score_map=fts_score_map,
+                    )
+                    return result
+                # else fall through to flat mode below
+
+                # For flat mode, we still have the scorer ready
+                scorer = scorer_fts
+
+                logger.debug("Selected %d documents: %s", len(selected), [d.doc_name for d in selected])
+
+                result = await _search_flat_mode(
+                    query, selected, scorer, cfg,
+                    max_nodes_per_doc=max_nodes_per_doc,
+                    text_mode=text_mode,
+                    include_ancestors=include_ancestors,
+                    merge_strategy=merge_strategy,
+                )
+                return result
+
+        # Standard routing path (for non-tree modes or grep-needing docs)
         agg = fts_index.search_with_aggregation(query, top_k=top_k_docs)
         if agg:
             relevant_ids = {a["doc_id"] for a in agg}
@@ -460,21 +531,28 @@ async def _search_tree_mode(
     text_mode: str = "full",
     include_ancestors: bool = False,
     merge_strategy: str = "interleave",
+    fts_score_map: dict[str, dict[str, float]] | None = None,
 ) -> dict:
-    """Tree search mode: anchor retrieval -> tree walk -> path aggregation."""
+    """Tree search mode: anchor retrieval -> tree walk -> path aggregation.
+
+    Args:
+        fts_score_map: pre-computed {doc_id: {node_id: score}}. If provided,
+            skips scorer.score_nodes_batch() call (fast path when routing and
+            scoring are merged). If None, scores are computed from scorer.
+    """
     from .tree_searcher import TreeSearcher
 
-    # Build FTS score maps for all selected documents
-    # Use batch scoring when scorer supports it — single SQL instead of N queries
-    fts_score_map: dict[str, dict[str, float]] = {}
-    doc_ids = [doc.doc_id for doc in selected]
-    if hasattr(scorer, "score_nodes_batch"):
-        fts_score_map = scorer.score_nodes_batch(query, doc_ids=doc_ids)
-    else:
-        for doc in selected:
-            scores = scorer.score_nodes(query, doc.doc_id)
-            if scores:
-                fts_score_map[doc.doc_id] = scores
+    # Build FTS score maps — use pre-computed if available, else from scorer
+    if fts_score_map is None:
+        fts_score_map = {}
+        doc_ids = [doc.doc_id for doc in selected]
+        if hasattr(scorer, "score_nodes_batch"):
+            fts_score_map = scorer.score_nodes_batch(query, doc_ids=doc_ids)
+        else:
+            for doc in selected:
+                scores = scorer.score_nodes(query, doc.doc_id)
+                if scores:
+                    fts_score_map[doc.doc_id] = scores
 
     # Run tree search
     searcher = TreeSearcher()
@@ -489,7 +567,6 @@ async def _search_tree_mode(
 
     for doc in selected:
         nodes = doc_nodes_map.get(doc.doc_id, [])[:max_nodes_per_doc]
-        # Attach full node fields
         enriched_nodes = []
         for n in nodes:
             enriched_nodes.append({

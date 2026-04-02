@@ -873,6 +873,32 @@ class FTS5Index:
 
         return result
 
+    def ranked_node_ids(
+        self,
+        query: str,
+        doc_ids: list[str] | None = None,
+        top_k: int = 10,
+    ) -> list[str]:
+        """Convenience: return top-k node IDs ranked by FTS5 score.
+
+        Wraps score_nodes_batch → flatten → sort → top-k in one call.
+        Useful for flat FTS5 evaluation without manual dict wrangling.
+
+        Args:
+            query: search query
+            doc_ids: optional filter to specific documents
+            top_k: max results
+
+        Returns:
+            list of node_id strings, highest score first
+        """
+        batch = self.score_nodes_batch(query, doc_ids=doc_ids)
+        all_scored: list[tuple[str, float]] = []
+        for nscores in batch.values():
+            all_scored.extend(nscores.items())
+        all_scored.sort(key=lambda x: -x[1])
+        return [nid for nid, _ in all_scored[:top_k]]
+
     # -------------------------------------------------------------------
     # Document persistence (tree structure storage)
     # -------------------------------------------------------------------

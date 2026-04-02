@@ -39,10 +39,59 @@ Usage:
     # Compare with embedding retrieval:
     python examples/benchmark/qasper_benchmark.py --max-samples 50 --max-papers 20 --with-embedding
 
-  📊 SUMMARY (QASPER)
-  ──────────────────────────────────────────────────
-  Embedding (embedding-3): MRR=0.4235  R@5=0.4259  ⏱ 0.2003s/q
-  TreeSearch (FTS5):       MRR=0.4033  R@5=0.5337  ⏱ 0.0011s/q
+BENCHMARK: QASPER -- Embedding vs FTS5 vs Tree
+================================================================================
+
+  Ranking Quality
+  Metric                     EMBEDDING          FTS5          TREE
+  ----------------------------------------------------------------
+  MRR                           0.4235        0.4033        0.5046
+  NDCG@1                        0.2553        0.2128        0.3191
+  NDCG@3                        0.3053        0.2929        0.3605
+  NDCG@5                        0.3525        0.3853        0.4529
+  NDCG@10                       0.4245        0.5082        0.5668
+
+  Precision / Recall / F1
+  Metric                     EMBEDDING          FTS5          TREE
+  ----------------------------------------------------------------
+  P@1                           0.2553        0.2128        0.3191
+  R@1                           0.1215        0.1525        0.1879
+  F1@1                          0.1485        0.1702        0.2227
+
+  P@3                           0.2057        0.1986        0.2340
+  R@3                           0.3078        0.3387        0.3794
+  F1@3                          0.2196        0.2303        0.2676
+
+  P@5                           0.1957        0.2000        0.2213
+  R@5                           0.4259        0.5337        0.5812
+  F1@5                          0.2406        0.2687        0.2957
+
+  P@10                          0.1489        0.1745        0.1809
+  R@10                          0.6075        0.8372        0.8674
+  F1@10                         0.2177        0.2692        0.2791
+
+  Hit Rate
+  Metric                     EMBEDDING          FTS5          TREE
+  ----------------------------------------------------------------
+  Hit@1                         0.2553        0.2128        0.3191
+  Hit@3                         0.4894        0.5106        0.5745
+  Hit@5                         0.6383        0.7021        0.7660
+  Hit@10                        0.8085        0.9574        0.9787
+
+  Cost & Efficiency
+  Metric                     EMBEDDING          FTS5          TREE
+  ----------------------------------------------------------------
+  Index time (s)                   0.0           0.1           0.1
+  Num chunks/nodes                 875           291           291
+  Avg query time (s)            0.1548        0.0007        0.0010
+
+================================================================================
+
+  SUMMARY (QASPER)
+  ________________________________________________________________
+  Embedding (embedding-3): MRR=0.4235  R@5=0.4259  T=0.1548s/q
+  TreeSearch (FTS5):            MRR=0.4033  R@5=0.5337  T=0.0007s/q
+  TreeSearch (Tree):            MRR=0.5046  R@5=0.5812  T=0.0010s/q
 """
 import asyncio
 import argparse
@@ -544,7 +593,7 @@ async def run_embedding_comparison(
             hit = "HIT" if metrics.get("hit@1", 0) > 0 else "miss"
             print(f"  [{i + 1}/{len(samples)}] MRR={metrics.get('mrr', 0):.2f} "
                   f"P@3={metrics.get('precision@3', 0):.2f} R@3={metrics.get('recall@3', 0):.2f} "
-                  f"[{hit}] {tracker.stats.latency_seconds:.2f}s")
+                  f"[{hit}] {tracker.stats.latency_seconds:.4f}s")
         else:
             print(f"  [{i + 1}/{len(samples)}] Skipped (no ground truth)")
 
@@ -592,17 +641,13 @@ async def run_embedding_comparison(
     for i, sample in enumerate(samples):
         tracker = CostTracker()
         with tracker:
-            all_scored: list[tuple[str, float]] = []
             target_docs = documents
             if sample.doc_id:
                 matched = [d for d in documents if sample.doc_id in d.doc_id or sample.doc_id in d.doc_name]
                 if matched:
                     target_docs = matched
-            for doc in target_docs:
-                node_scores = fts_index.score_nodes(sample.question, doc.doc_id)
-                all_scored.extend(node_scores.items())
-            all_scored.sort(key=lambda x: -x[1])
-            retrieved_node_ids = [nid for nid, _ in all_scored[:max(k_values)]]
+            doc_ids = [doc.doc_id for doc in target_docs]
+            retrieved_node_ids = fts_index.ranked_node_ids(sample.question, doc_ids=doc_ids, top_k=max(k_values))
 
         relevant_node_ids = resolve_relevant_nodes(sample, documents)
         metrics = evaluate_query(retrieved_node_ids, relevant_node_ids, k_values) if relevant_node_ids else {}
@@ -611,7 +656,7 @@ async def run_embedding_comparison(
             hit = "HIT" if metrics.get("hit@1", 0) > 0 else "miss"
             print(f"  [{i + 1}/{len(samples)}] MRR={metrics.get('mrr', 0):.2f} "
                   f"P@3={metrics.get('precision@3', 0):.2f} R@3={metrics.get('recall@3', 0):.2f} "
-                  f"[{hit}] {tracker.stats.latency_seconds:.3f}s")
+                  f"[{hit}] {tracker.stats.latency_seconds:.4f}s")
         else:
             print(f"  [{i + 1}/{len(samples)}] Skipped (no ground truth)")
 
@@ -667,6 +712,7 @@ async def run_embedding_comparison(
     ))
 
     tree_results = []
+    searcher = TreeSearcher(fts_index=fts_index)
     for i, sample in enumerate(samples):
         tracker = CostTracker()
         with tracker:
@@ -675,13 +721,7 @@ async def run_embedding_comparison(
                 matched = [d for d in documents if sample.doc_id in d.doc_id or sample.doc_id in d.doc_name]
                 if matched:
                     target_docs = matched
-            fts_score_map: dict[str, dict[str, float]] = {}
-            for doc in target_docs:
-                scores = fts_index.score_nodes(sample.question, doc.doc_id)
-                if scores:
-                    fts_score_map[doc.doc_id] = scores
-            searcher = TreeSearcher()
-            paths, flat_nodes = searcher.search(sample.question, target_docs, fts_score_map)
+            _, flat_nodes = searcher.search(sample.question, target_docs)
             retrieved_node_ids = [fn["node_id"] for fn in flat_nodes[:max(k_values)]]
 
         relevant_node_ids = resolve_relevant_nodes(sample, documents)
@@ -691,7 +731,7 @@ async def run_embedding_comparison(
             hit = "HIT" if metrics.get("hit@1", 0) > 0 else "miss"
             print(f"  [{i + 1}/{len(samples)}] MRR={metrics.get('mrr', 0):.2f} "
                   f"P@3={metrics.get('precision@3', 0):.2f} R@3={metrics.get('recall@3', 0):.2f} "
-                  f"[{hit}] {tracker.stats.latency_seconds:.3f}s")
+                  f"[{hit}] {tracker.stats.latency_seconds:.4f}s")
         else:
             print(f"  [{i + 1}/{len(samples)}] Skipped (no ground truth)")
 
@@ -841,8 +881,8 @@ async def main():
     )
     parser.add_argument(
         "--strategies", type=str, nargs="+",
-        default=["fts5", "tree"],
-        help="Search strategies to evaluate: fts5, tree (default: fts5 tree)"
+        default=["fts5", "tree", "auto"],
+        help="Search strategies to evaluate: fts5, tree, auto (default: fts5 tree auto)"
     )
     parser.add_argument("--max-samples", type=int, default=50, help="Max QA samples to evaluate")
     parser.add_argument("--max-papers", type=int, default=20, help="Max papers to index")

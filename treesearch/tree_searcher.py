@@ -100,31 +100,92 @@ class TreeSearcher:
     """Best-First Tree Search engine.
 
     Usage::
+
+        # Recommended: let TreeSearcher handle FTS5 scoring internally (fast path)
         searcher = TreeSearcher()
+        paths, flat_nodes = searcher.search(query, documents)
+
+        # With explicit FTS5 index (for benchmarks or custom indexes)
+        from treesearch.fts import FTS5Index
+        fts = FTS5Index()
+        fts.index_documents(documents)
+        searcher = TreeSearcher(fts_index=fts)
+        paths, flat_nodes = searcher.search(query, documents)
+
+        # Also works: pass pre-computed scores (for custom scoring logic)
+        fts_scores = {"doc1": {"node1": 0.9, "node2": 0.3}}
         paths, flat_nodes = searcher.search(query, documents, fts_scores)
     """
 
-    def __init__(self):
+    def __init__(self, fts_index=None):
+        """
+        Args:
+            fts_index: optional FTS5Index instance. If provided, used for
+                auto-scoring when fts_score_map is not passed to search().
+                If None, the global singleton from get_fts_index() is used.
+        """
         self.cfg = get_config()
+        self._fts_index = fts_index
+
+    def _auto_score(
+        self,
+        query: str,
+        documents: list[Document],
+    ) -> dict[str, dict[str, float]]:
+        """Compute FTS5 scores via batch query (single SQL).
+
+        This is the recommended fast path: one SQL query covers all documents
+        instead of N per-doc queries. Documents must already be indexed in the
+        FTS5 index (via FTS5Index.index_document or index_documents).
+
+        Uses self._fts_index if provided (e.g., benchmark with custom index),
+        otherwise falls back to the global singleton from get_fts_index().
+        """
+        if self._fts_index is not None:
+            fts_index = self._fts_index
+        else:
+            from .fts import get_fts_index
+            fts_index = get_fts_index(db_path=self.cfg.fts_db_path or None, weights={
+                "title": self.cfg.fts_title_weight,
+                "summary": self.cfg.fts_summary_weight,
+                "body": self.cfg.fts_body_weight,
+                "code_blocks": self.cfg.fts_code_weight,
+                "front_matter": self.cfg.fts_front_matter_weight,
+            })
+            # Ensure all documents are indexed
+            doc_map = {d.doc_id: d for d in documents}
+            unindexed = fts_index.get_unindexed_doc_ids(list(doc_map.keys()))
+            for doc_id in unindexed:
+                fts_index.index_document(doc_map[doc_id])
+        doc_ids = [d.doc_id for d in documents]
+        return fts_index.score_nodes_batch(query, doc_ids=doc_ids)
 
     def search(
         self,
         query: str,
         documents: list[Document],
-        fts_score_map: dict[str, dict[str, float]],
+        fts_score_map: dict[str, dict[str, float]] | None = None,
     ) -> tuple[list[PathResult], list[dict]]:
         """Run tree search across documents.
 
         Args:
             query: user query string
             documents: list of Document objects to search
-            fts_score_map: {doc_id: {node_id: normalized_score}} from FTS5
+            fts_score_map: pre-computed {doc_id: {node_id: normalized_score}}.
+                If None, scores are computed internally via FTS5Index.score_nodes_batch()
+                (single SQL query — fast path). Passing a dict is supported for
+                backward compatibility or custom scoring, but the internal path is
+                preferred for performance.
 
         Returns:
             (paths, flat_nodes) where:
             - paths: top-K PathResult objects
             - flat_nodes: flattened node list with scores (compatible with old API)
         """
+        # Auto-compute FTS5 scores if not provided (recommended fast path)
+        if fts_score_map is None:
+            fts_score_map = self._auto_score(query, documents)
+
         plan = build_query_plan(query)
         all_paths: list[PathResult] = []
         all_walked_nodes: list[tuple[str, str, float, float, int]] = []
@@ -132,17 +193,32 @@ class TreeSearcher:
         # Pre-cache flatten_tree results per doc — shared between search loop and _build_flat_nodes
         doc_flat_cache: dict[str, list[dict]] = {}
 
+        # Sort documents by max FTS5 score descending so we process
+        # the most relevant docs first. This enables early termination
+        # and ensures the tree walk budget is spent on top docs.
+        scored_docs = []
         for doc in documents:
             doc_scores = fts_score_map.get(doc.doc_id, {})
             if not doc_scores:
                 continue
+            max_score = max(doc_scores.values())
+            scored_docs.append((max_score, doc, doc_scores))
+        scored_docs.sort(key=lambda x: -x[0])
 
+        # Limit to top docs by score: docs beyond this contribute little.
+        # With 60+ scored docs, the bottom half typically have max_score < 0.1
+        # and almost never produce top-K results.
+        _MAX_DOCS_TO_WALK = 20
+        scored_docs = scored_docs[:_MAX_DOCS_TO_WALK]
+
+        for _, doc, doc_scores in scored_docs:
             from .tree import flatten_tree
             all_nodes = flatten_tree(doc.structure)
             doc_flat_cache[doc.doc_id] = all_nodes
 
-            # Skip IDF for shallow/small docs (< 20 nodes): no benefit, save the scan
-            if plan.terms and len(all_nodes) > 20:
+            # Skip IDF for shallow/small docs (< 20 nodes) or docs with few
+            # FTS5-scored nodes (< 5): IDF adds little value and costs O(N*terms).
+            if plan.terms and len(all_nodes) > 20 and len(doc_scores) >= 5:
                 corpus_texts = [n.get("text", "") for n in all_nodes]
                 idf = estimate_idf(plan.terms, corpus_texts)
             else:
@@ -185,9 +261,27 @@ class TreeSearcher:
         plan: QueryPlan,
         idf: dict[str, float] | None = None,
     ) -> list[SearchState]:
-        """Select top anchor nodes from FTS5 scores."""
+        """Select top anchor nodes from FTS5 scores.
+
+        Optimization: pre-filter by FTS5 score to avoid expensive scoring
+        (compute_term_overlap, check_phrase_match) on low-relevance nodes.
+        Only the top candidates by raw FTS5 score are fully scored.
+        """
+        # Pre-filter: only fully score the top N candidates by raw FTS5 score.
+        # anchor_top_k anchors are needed; score 3x more candidates to allow
+        # for dedup filtering. Nodes below this threshold are skipped.
+        max_candidates = self.cfg.anchor_top_k * 3
+        if len(doc_scores) > max_candidates:
+            # Get the score threshold for top candidates
+            sorted_scores = sorted(doc_scores.values(), reverse=True)
+            threshold = sorted_scores[min(max_candidates, len(sorted_scores)) - 1]
+        else:
+            threshold = 0.0
+
         candidates = []
         for nid, fts_score in doc_scores.items():
+            if fts_score < threshold:
+                continue
             node = doc.get_node_by_id(nid)
             if not node:
                 continue
@@ -204,7 +298,6 @@ class TreeSearcher:
                 ),
                 body_term_overlap=compute_term_overlap(text, plan.terms, idf),
             )
-            # Store node to avoid second get_node_by_id lookup below
             candidates.append((a_score, nid, node))
 
         # Sort by score descending
@@ -350,9 +443,8 @@ class TreeSearcher:
                 else:
                     new_path = doc.get_path_to_root(nid)
 
-                reasons = list(state.reasons)
-                reasons.append(f"{relation}: {title[:40]}")
-
+                # Defer reasons building: only store minimal info during walk.
+                # Full reasons are built in _states_to_paths for top-K states.
                 new_state = SearchState(
                     doc_id=doc.doc_id,
                     node_id=nid,
@@ -360,7 +452,7 @@ class TreeSearcher:
                     hop=state.hop + 1,
                     source=relation,
                     path=new_path,
-                    reasons=reasons,
+                    reasons=state.reasons,  # share reference, don't copy
                     max_ancestor_score=new_max_anc,
                 )
                 heapq.heappush(frontier, new_state)
@@ -412,14 +504,24 @@ class TreeSearcher:
         doc_scores: dict[str, float],
         plan: QueryPlan,
     ) -> list[PathResult]:
-        """Convert search states into scored PathResults."""
+        """Convert search states into scored PathResults.
+
+        Only processes top path_top_k*2 states to avoid expensive path
+        construction for low-scoring states that won't make the final cut.
+        """
         results: list[PathResult] = []
         seen_targets: set[str] = set()
 
         # Sort states by score descending
         states.sort(key=lambda s: -s.score)
 
+        # Limit to top candidates — building full paths is expensive
+        max_to_process = self.cfg.path_top_k * 2
+
         for state in states:
+            if len(results) >= max_to_process:
+                break
+
             # Deduplicate by target node
             if state.node_id in seen_targets:
                 continue
@@ -488,14 +590,20 @@ class TreeSearcher:
     ) -> list[dict]:
         """Build flat node list: FTS5 base + structural reranking from tree walk.
 
-        Strategy (5 stages):
-        1. Base: all FTS5 scored nodes at their original score
-        1b. Generic section demotion (for academic paper sections)
+        Optimized pipeline (P0+P1+P2):
+        - P0: Pre-compute NodeContext once per node (title_lower, text_lower,
+              term_hits, parent_id, children_ids, etc.) to eliminate redundant
+              get_node_by_id / .lower() / substring matching across stages.
+        - P1: Merge stages 1b (generic demotion) + 1c (leaf preference) +
+              7 (title match boost) into a single pass over NodeContext.
+        - P2: Stages 4-7 only process top-100 nodes by score to skip long tail.
+
+        Strategy (7 stages, optimized execution):
+        1. Base: FTS5 scores + merged 1b/1c/7 in one pass via NodeContext
         2. Title-prefix propagation (for ::: delimited hierarchies)
         3. Walk boost + Walk-only injection
-        4. Parent context boost: propagate relevance from structurally close
-           high-scoring ancestors to low-scoring children (key for financial docs)
-        5. Term density boost: rerank by query term coverage
+        4-7. Parent context / Term density / Subtree evidence / Title match
+             (applied to top-100 nodes only)
         """
         from .tree import flatten_tree
 
@@ -509,62 +617,96 @@ class TreeSearcher:
             doc = doc_map.get(doc_id)
             return flatten_tree(doc.structure) if doc else []
 
+        # Extract plan data once
+        has_plan_terms = bool(plan and plan.terms)
+        terms = plan.terms if has_plan_terms else []
+        n_terms = len(terms)
+
+        # Per-doc top-N cutoff: only keep highest-scoring nodes per document.
+        # N scales with the number of documents: fewer docs → allow more nodes per doc
+        # so that large single-document corpora (e.g. FinanceBench PDFs with 200+ nodes)
+        # are not over-truncated, while many-doc corpora (e.g. CodeSearchNet 1000 docs)
+        # still get the speed benefit.
+        n_docs = max(1, len(fts_score_map))
+        _MAX_NODES_PER_DOC = max(50, min(500, 2000 // n_docs))
+        for doc_id, doc_scores in list(fts_score_map.items()):
+            if len(doc_scores) > _MAX_NODES_PER_DOC:
+                top_items = sorted(doc_scores.items(), key=lambda x: -x[1])[:_MAX_NODES_PER_DOC]
+                fts_score_map[doc_id] = dict(top_items)
+
         # 1. Base: FTS5 scores as foundation
         for doc_id, doc_scores in fts_score_map.items():
             for nid, fts_s in doc_scores.items():
                 node_scores[(doc_id, nid)] = fts_s
 
-        # 1b. Generic section demotion: reduce score of overview sections
-        # (Abstract, Introduction, Conclusion, etc.) that get inflated BM25
-        # scores due to broad topic coverage rather than specific answers.
-        # NOTE: depth=0 root nodes (e.g., paper title or PDF doc title) are NOT
-        # demoted since they are often the most relevant entry point.
-        # Strategy 1: Query-Aware Demotion — skip demotion when query
-        # explicitly targets the section (e.g., "introduction methods").
-        for doc_id, doc_scores in fts_score_map.items():
-            doc = doc_map.get(doc_id)
-            if not doc:
-                continue
-            for nid in doc_scores:
-                node = doc.get_node_by_id(nid)
-                if not node:
-                    continue
-                title = node.get("title", "")
-                depth = doc.get_depth(nid)
-                if depth == 0:
-                    continue  # Root nodes are never demoted
-                if is_generic_section(title, depth):
-                    key = (doc_id, nid)
-                    # Query-aware: don't demote if query terms mention this section
-                    if plan and plan.terms:
-                        base_title = title.split(" ::: ")[0].strip().lower() if " ::: " in title else title.strip().lower()
-                        query_targets_section = any(t in base_title for t in plan.terms)
-                        if query_targets_section:
-                            continue  # Skip demotion — query targets this section
-                    node_scores[key] *= 0.70
+        # -------------------------------------------------------------------
+        # P0: Pre-compute NodeContext for all scored nodes (ONE pass)
+        # This replaces repeated get_node_by_id + .lower() + substring matching
+        # across stages 1b, 1c, 3, 4, 5, 6, 7.
+        # -------------------------------------------------------------------
+        # NodeContext tuple: (title_lower, text_lower, full_lower, term_hits,
+        #                     term_overlap, parent_id, children_ids, depth, text_len)
+        _ctx: dict[tuple[str, str], tuple] = {}
+        # Indices into the context tuple
+        _TITLE = 0; _TEXT = 1; _FULL = 2; _HITS = 3; _OVERLAP = 4
+        _PID = 5; _CHILDREN = 6; _DEPTH = 7; _TEXTLEN = 8
 
-        # 1c. Leaf node preference: leaf nodes with substantial text are more
-        # likely to contain specific answers than heading/parent nodes.
-        # BM25 over-ranks heading nodes because they mention more terms broadly.
-        for doc_id, doc_scores in fts_score_map.items():
+        for (doc_id, nid) in node_scores:
             doc = doc_map.get(doc_id)
             if not doc:
                 continue
-            for nid in doc_scores:
-                node = doc.get_node_by_id(nid)
-                if not node:
-                    continue
-                children = doc.get_children_ids(nid)
-                text_len = len(node.get("text", ""))
-                if not children and text_len > 100:
-                    key = (doc_id, nid)
-                    if key in node_scores:
-                        node_scores[key] *= 1.08  # 8% leaf bonus
+            node = doc.get_node_by_id(nid)
+            if not node:
+                continue
+            title_lower = (node.get("title", "") or "").lower()
+            text_lower = (node.get("text", "") or "").lower()
+            full_lower = title_lower + " " + text_lower if title_lower else text_lower
+            if has_plan_terms and full_lower.strip():
+                hits = sum(1 for t in terms if t in full_lower)
+                overlap = hits / n_terms
+            else:
+                hits = 0
+                overlap = 0.0
+            pid = doc.get_parent_id(nid)
+            children = doc.get_children_ids(nid)
+            depth = doc.get_depth(nid)
+            text_len = len(node.get("text", ""))
+            _ctx[(doc_id, nid)] = (
+                title_lower, text_lower, full_lower, hits, overlap,
+                pid, children, depth, text_len,
+            )
+
+        # -------------------------------------------------------------------
+        # P1: Merged pass — Stage 1b (generic demotion) + 1c (leaf preference)
+        # Applied in one loop over _ctx instead of 2 separate loops.
+        # Stage 7 (title match boost) is deferred to the top-100 pass below.
+        # -------------------------------------------------------------------
+        for key, ctx in _ctx.items():
+            score = node_scores[key]
+            depth = ctx[_DEPTH]
+            title_lower = ctx[_TITLE]
+            children = ctx[_CHILDREN]
+            text_len = ctx[_TEXTLEN]
+
+            # 1b. Generic section demotion
+            if depth > 0:
+                # Inline is_generic_section to avoid function call overhead
+                base_title = title_lower.split(" ::: ")[0].strip() if " ::: " in title_lower else title_lower.strip()
+                if is_generic_section(base_title, depth):
+                    # Query-aware: don't demote if query terms mention this section
+                    if has_plan_terms and any(t in base_title for t in terms):
+                        pass  # skip demotion
+                    else:
+                        score *= 0.70
+
+            # 1c. Leaf node preference
+            if not children and text_len > 100:
+                score *= 1.08
+
+            node_scores[key] = score
 
         # 2. Title-prefix propagation: scan ALL low-score nodes in each document.
-        # In QASPER, section titles use ::: delimiter for hierarchy,
-        # e.g. "Systems ::: Baseline" is logically under "Systems".
-        # If a logical parent has high FTS5 score, propagate a fraction.
+        # In QASPER, section titles use ::: delimiter for hierarchy.
         for doc_id, doc_scores in fts_score_map.items():
             doc = doc_map.get(doc_id)
             if not doc:
@@ -575,13 +717,9 @@ class TreeSearcher:
             for nid, fts_s in doc_scores.items():
                 if fts_s < 0.15:
                     continue
-                node = doc.get_node_by_id(nid)
-                if not node:
-                    continue
-                title = node.get("title", "").lower()
-                if title:
-                    parent_candidates.append((nid, title, fts_s))
-            # Keep only top-20 by score to bound the O(N_nodes × N_candidates) loop
+                ctx = _ctx.get((doc_id, nid))
+                if ctx and ctx[_TITLE]:
+                    parent_candidates.append((nid, ctx[_TITLE], fts_s))
             if len(parent_candidates) > 20:
                 parent_candidates.sort(key=lambda x: -x[2])
                 parent_candidates = parent_candidates[:20]
@@ -590,7 +728,7 @@ class TreeSearcher:
                 continue
 
             # Propagate to low-score nodes with matching title prefix
-            all_nodes = _get_flat_nodes(doc_id)  # reuse cached flatten_tree
+            all_nodes = _get_flat_nodes(doc_id)
             for node_dict in all_nodes:
                 nid = node_dict.get("node_id", "")
                 key = (doc_id, nid)
@@ -615,184 +753,232 @@ class TreeSearcher:
                     node_scores[key] = max(current_score, propagated)
 
         # 3. Walk boost + Walk-only injection
-        # Walk boost: walked nodes with FTS5 scores get structural confirmation bonus.
-        # Walk-only injection: nodes FTS5 missed but structurally close to anchors.
         walked_set: set[tuple[str, str]] = set()
         for doc_id, nid, combined_score, fts_s, hop in walked_nodes:
             key = (doc_id, nid)
             walked_set.add(key)
             if key in node_scores:
-                # Node found by both FTS5 and Walk — structural confirmation bonus
                 walk_bonus = 0.15 * combined_score
                 node_scores[key] = node_scores[key] + walk_bonus
-            elif fts_s == 0 and plan and plan.terms and hop <= 3:
-                # Walk-discovered node with NO FTS5 signal (truly missed by FTS5).
-                # Only inject if text contains query terms to avoid false positives.
-                doc = doc_map.get(doc_id)
-                if doc:
+            elif fts_s == 0 and has_plan_terms and hop <= 3:
+                # Walk-only injection: use pre-computed context if available,
+                # otherwise compute on demand (walk nodes may not be in _ctx yet)
+                ctx = _ctx.get(key)
+                if ctx:
+                    full = ctx[_FULL]
+                    overlap = ctx[_OVERLAP]
+                else:
+                    doc = doc_map.get(doc_id)
+                    if not doc:
+                        continue
                     node = doc.get_node_by_id(nid)
-                    if node:
-                        text = (node.get("text", "") or "").lower()
-                        title = (node.get("title", "") or "").lower()
-                        full = title + " " + text
-                        if full.strip():
-                            hits = sum(1 for t in plan.terms if t in full)
-                            overlap = hits / len(plan.terms)
-                            # Strict overlap threshold: node must be clearly relevant
-                            if overlap >= 0.40:
-                                hop_decay = 1.0 - 0.15 * (hop - 1)  # hop 1→1.0, 2→0.85, 3→0.70
-                                inject_score = min(0.25 * overlap * hop_decay, 0.20)
-                                node_scores[key] = inject_score
+                    if not node:
+                        continue
+                    text = (node.get("text", "") or "").lower()
+                    title = (node.get("title", "") or "").lower()
+                    full = title + " " + text
+                    if full.strip():
+                        hits = sum(1 for t in terms if t in full)
+                        overlap = hits / n_terms
+                    else:
+                        overlap = 0.0
+                if overlap >= 0.40:
+                    hop_decay = 1.0 - 0.15 * (hop - 1)
+                    inject_score = min(0.25 * overlap * hop_decay, 0.20)
+                    node_scores[key] = inject_score
+
+        # -------------------------------------------------------------------
+        # P2: Top-N cutoff for expensive reranking stages (4-7)
+        # N scales with number of documents: fewer docs → more nodes per doc get
+        # boosted (critical for large single-doc corpora like FinanceBench PDFs).
+        # -------------------------------------------------------------------
+        _TOP_N_RERANK = max(100, min(500, 2000 // max(1, len(fts_score_map))))
+        if len(node_scores) > _TOP_N_RERANK:
+            top_keys = sorted(node_scores, key=lambda k: -node_scores[k])[:_TOP_N_RERANK]
+            rerank_set = set(top_keys)
+        else:
+            rerank_set = set(node_scores.keys())
+
+        # Ensure rerank nodes have context (walk-injected nodes may be missing)
+        for key in rerank_set:
+            if key not in _ctx:
+                doc_id, nid = key
+                doc = doc_map.get(doc_id)
+                if not doc:
+                    continue
+                node = doc.get_node_by_id(nid)
+                if not node:
+                    continue
+                title_lower = (node.get("title", "") or "").lower()
+                text_lower = (node.get("text", "") or "").lower()
+                full_lower = title_lower + " " + text_lower if title_lower else text_lower
+                if has_plan_terms and full_lower.strip():
+                    hits = sum(1 for t in terms if t in full_lower)
+                    overlap = hits / n_terms
+                else:
+                    hits = 0
+                    overlap = 0.0
+                pid = doc.get_parent_id(nid)
+                children = doc.get_children_ids(nid)
+                depth = doc.get_depth(nid)
+                text_len = len(node.get("text", ""))
+                _ctx[key] = (
+                    title_lower, text_lower, full_lower, hits, overlap,
+                    pid, children, depth, text_len,
+                )
 
         # 4. Parent context boost (key for financial docs)
-        # Core insight from diagnosis: 24/27 both-miss cases have relevant nodes
-        # with FTS5 scores in 0.15-0.60 range, but ranked too low (rank 9-78).
-        # Financial docs have the pattern: parent node (e.g., "Revenue") has high
-        # FTS5 score, but the *child* containing the actual number has lower score.
-        # This stage conditionally propagates parent relevance to children that
-        # also contain query terms (to avoid blindly boosting unrelated children).
-        #
-        # Top-K optimization: only iterate over nodes already in node_scores
-        # (FTS5-scored + walk-injected), not full document. Parent/grandparent
-        # FTS5 scores are still looked up from fts_score_map.
-        if plan and plan.terms:
-            for (doc_id, nid), current in list(node_scores.items()):
-                if current < 0.05:
-                    continue
-
+        # Scan ALL nodes (via _get_flat_nodes) so that nodes not in FTS5 top-N
+        # can still be lifted by their high-scoring parent/grandparent.
+        # This is critical for FinanceBench: parent "Revenue" has high FTS5 score
+        # but child nodes with the actual numbers may rank below top-N.
+        if has_plan_terms:
+            for doc_id, doc_scores in fts_score_map.items():
                 doc = doc_map.get(doc_id)
                 if not doc:
                     continue
-                doc_scores = fts_score_map.get(doc_id, {})
+                all_nodes = _get_flat_nodes(doc_id)
+                for node_dict in all_nodes:
+                    nid = node_dict.get("node_id", "")
+                    key = (doc_id, nid)
+                    current = node_scores.get(key, 0.0)
+                    if current < 0.01:
+                        continue
 
-                node = doc.get_node_by_id(nid)
-                if not node:
-                    continue
+                    # Use pre-computed context if available, else compute inline
+                    ctx = _ctx.get(key)
+                    if ctx:
+                        overlap = ctx[_OVERLAP]
+                        pid = ctx[_PID]
+                    else:
+                        text = (node_dict.get("text", "") or "").lower()
+                        title = (node_dict.get("title", "") or "").lower()
+                        full_text = title + " " + text
+                        if not full_text.strip():
+                            continue
+                        hits = sum(1 for t in terms if t in full_text)
+                        overlap = hits / n_terms
+                        pid = doc.get_parent_id(nid)
 
-                # Only boost if the node itself contains query terms
-                text = (node.get("text", "") or "").lower()
-                title = (node.get("title", "") or "").lower()
-                full_text = title + " " + text
-                if not full_text.strip():
-                    continue
-                hits = sum(1 for t in plan.terms if t in full_text)
-                overlap = hits / len(plan.terms)
-                if overlap < 0.20:
-                    continue  # Node doesn't contain enough query terms
+                    if overlap < 0.20:
+                        continue
 
-                # 4a. Boost from parent: if parent has higher FTS5,
-                # child gets lifted. Additive threshold ensures parent is meaningfully stronger.
-                pid = doc.get_parent_id(nid)
-                if pid:
-                    parent_fts = doc_scores.get(pid, 0.0)
-                    # Relaxed threshold: parent needs only slight edge
-                    if parent_fts > current + 0.02:
-                        parent_boost = 0.55 * parent_fts * overlap
-                        node_scores[(doc_id, nid)] = current + parent_boost
+                    # 4a. Parent boost
+                    if pid:
+                        parent_fts = doc_scores.get(pid, 0.0)
+                        if parent_fts > current + 0.06:
+                            parent_boost = 0.50 * parent_fts * overlap
+                            node_scores[key] = current + parent_boost
 
-                # 4b. Grandparent boost: strong signal that this subtree is relevant
-                grandparent_pid = doc.get_parent_id(pid) if pid else None
-                if grandparent_pid:
-                    gp_fts = doc_scores.get(grandparent_pid, 0.0)
-                    if gp_fts > current + 0.05:
-                        gp_boost = 0.30 * gp_fts * overlap
-                        node_scores[(doc_id, nid)] = node_scores.get((doc_id, nid), current) + gp_boost
+                    # 4b. Grandparent boost
+                    grandparent_pid = None
+                    if pid:
+                        p_ctx = _ctx.get((doc_id, pid))
+                        if p_ctx:
+                            grandparent_pid = p_ctx[_PID]
+                        else:
+                            grandparent_pid = doc.get_parent_id(pid)
+                    if grandparent_pid:
+                        gp_fts = doc_scores.get(grandparent_pid, 0.0)
+                        if gp_fts > current + 0.10:
+                            gp_boost = 0.25 * gp_fts * overlap
+                            node_scores[key] = node_scores.get(key, current) + gp_boost
 
-        # 5. Term density boost: nodes with higher query term density get boosted.
-        # This reranks nodes based on how many unique query terms appear in the text,
-        # improving precision for multi-term queries (e.g., financial queries).
-        if plan and plan.terms and len(plan.terms) >= 2:
-            for (doc_id, nid), score in list(node_scores.items()):
+        # 5. Term density boost (top-100 only)
+        if has_plan_terms and n_terms >= 2:
+            for key in rerank_set:
+                score = node_scores[key]
                 if score < 0.05:
                     continue
-                doc = doc_map.get(doc_id)
-                if not doc:
+                ctx = _ctx.get(key)
+                if not ctx:
                     continue
-                node = doc.get_node_by_id(nid)
-                if not node:
-                    continue
-                text = (node.get("text", "") or "").lower()
-                title = (node.get("title", "") or "").lower()
-                combined_text = title + " " + text
-                if not combined_text.strip():
-                    continue
-                # Count unique query terms present
-                hits = sum(1 for t in plan.terms if t in combined_text)
-                overlap = hits / len(plan.terms)
+                overlap = ctx[_OVERLAP]
                 if overlap >= 0.5:
-                    # Only boost nodes with high term coverage to avoid noise
                     density_bonus = 0.12 * overlap * score
-                    node_scores[(doc_id, nid)] += density_bonus
+                    node_scores[key] = score + density_bonus
 
-        # 6. Subtree evidence aggregation: lift low-scoring nodes in strong
-        # structural neighborhoods. Current Stages 3-5 add 10-15% bonuses which
-        # are too small to change rank order. This pass can promote a node from
-        # rank 8 to rank 3 when its parent/children/siblings have high scores.
-        for (doc_id, nid), score in list(node_scores.items()):
+        # 6. Subtree evidence aggregation (top-100 only)
+        for key in rerank_set:
+            score = node_scores[key]
             if score < 0.05:
                 continue
-            doc = doc_map.get(doc_id)
-            if not doc:
+            ctx = _ctx.get(key)
+            if not ctx:
                 continue
-
-            # Collect evidence from structural neighborhood
-            pid = doc.get_parent_id(nid)
+            doc_id, nid = key
+            pid = ctx[_PID]
             parent_score = node_scores.get((doc_id, pid), 0) if pid else 0
-            children_scores = [node_scores.get((doc_id, cid), 0)
-                               for cid in doc.get_children_ids(nid)]
-            sibling_scores = [node_scores.get((doc_id, sid), 0)
-                              for sid in doc.get_sibling_ids(nid)]
+            children_ids = ctx[_CHILDREN]
+            children_scores = [node_scores.get((doc_id, cid), 0) for cid in children_ids]
+
+            # Get sibling_ids via parent's children (avoid extra doc lookup)
+            sibling_scores = []
+            if pid:
+                p_ctx = _ctx.get((doc_id, pid))
+                if p_ctx:
+                    for sid in p_ctx[_CHILDREN]:
+                        if sid != nid:
+                            sibling_scores.append(node_scores.get((doc_id, sid), 0))
+                else:
+                    doc = doc_map.get(doc_id)
+                    if doc:
+                        for sid in doc.get_sibling_ids(nid):
+                            sibling_scores.append(node_scores.get((doc_id, sid), 0))
 
             best_child = max(children_scores) if children_scores else 0
             best_sibling = max(sibling_scores) if sibling_scores else 0
-
-            # Context evidence: strongest signal from neighborhood
             context = max(parent_score, best_child, best_sibling)
 
-            # Only boost if context is significantly stronger than self
             if context > score * 1.5 and context > 0.15:
                 lift = 0.30 * (context - score)
-                node_scores[(doc_id, nid)] = score + lift
+                node_scores[key] = score + lift
 
-        # 7. Title match boost: nodes whose title directly matches query terms
-        # get an additive bonus. This is critical for structured documents where
-        # section titles are highly descriptive (e.g., "Net Sales", "Methods").
-        if plan and plan.terms:
-            for (doc_id, nid), score in list(node_scores.items()):
+        # 7. Title match boost (top-100 only, uses pre-computed term_hits)
+        if has_plan_terms:
+            for key in rerank_set:
+                score = node_scores[key]
                 if score < 0.05:
                     continue
+                ctx = _ctx.get(key)
+                if not ctx:
+                    continue
+                title_lower = ctx[_TITLE]
+                if not title_lower:
+                    continue
+                # Compute title-specific hits (not full_text hits)
+                title_hits = sum(1 for t in terms if t in title_lower)
+                if title_hits > 0:
+                    title_overlap = title_hits / n_terms
+                    title_bonus = 0.15 * title_overlap * max(score, 0.10)
+                    node_scores[key] = score + title_bonus
+
+        # Build flat node dicts (uses _ctx to avoid extra get_node_by_id calls)
+        flat_nodes: list[dict] = []
+        for (doc_id, nid), score in node_scores.items():
+            ctx = _ctx.get((doc_id, nid))
+            if ctx:
+                # Recover original-case title from node (ctx only has lowercase)
+                doc = doc_map.get(doc_id)
+                node = doc.get_node_by_id(nid) if doc else None
+                title = node.get("title", "") if node else ""
+                text = node.get("text", "") if node else ""
+            else:
                 doc = doc_map.get(doc_id)
                 if not doc:
                     continue
                 node = doc.get_node_by_id(nid)
                 if not node:
                     continue
-                title = (node.get("title", "") or "").lower()
-                if not title:
-                    continue
-                title_hits = sum(1 for t in plan.terms if t in title)
-                if title_hits > 0:
-                    title_overlap = title_hits / len(plan.terms)
-                    # Additive bonus proportional to overlap and current score
-                    title_bonus = 0.15 * title_overlap * max(score, 0.10)
-                    node_scores[(doc_id, nid)] = score + title_bonus
-
-        # Build flat node dicts
-        flat_nodes: list[dict] = []
-        for (doc_id, nid), score in node_scores.items():
-            doc = doc_map.get(doc_id)
-            if not doc:
-                continue
-            node = doc.get_node_by_id(nid)
-            if not node:
-                continue
+                title = node.get("title", "")
+                text = node.get("text", "")
             flat_nodes.append({
                 "node_id": nid,
                 "doc_id": doc_id,
-                "doc_name": doc.doc_name,
-                "title": node.get("title", ""),
+                "doc_name": doc.doc_name if doc else "",
+                "title": title,
                 "score": round(score, 4),
-                "text": node.get("text", ""),
+                "text": text,
             })
 
         flat_nodes.sort(key=lambda x: -x["score"])
