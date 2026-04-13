@@ -771,6 +771,7 @@ class FTS5Index:
         query: str,
         doc_ids: list[str] | None = None,
         ancestor_decay: float = 0.6,
+        fts_expression: Optional[str] = None,
     ) -> dict[str, dict[str, float]]:
         """Batch version of score_nodes: score all documents in a single SQL query.
 
@@ -783,8 +784,34 @@ class FTS5Index:
 
             # After (fast): 1 SQL query
             all_scores = fts_index.score_nodes_batch(query, [d.doc_id for d in documents])
+
+        Args:
+            query: natural language query (tokenized internally)
+            doc_ids: optional filter to specific documents
+            ancestor_decay: propagation weight from child scores to parent nodes (0 = off)
+            fts_expression: raw FTS5 MATCH expression that *overrides* automatic query
+                tokenization. Supports full FTS5 syntax including prefix matching (*),
+                AND/OR/NOT, NEAR(), and column filters.
+
+                Examples::
+
+                    # Prefix match: "fts" matches fts, fts5, ftsearch, ...
+                    fts_expression="fts*"
+
+                    # Multi-term prefix OR
+                    fts_expression="fts* OR python*"
+
+                    # Exact phrase
+                    fts_expression='"machine learning"'
+
+                    # Column-scoped search
+                    fts_expression="title : config*"
+
+                    # Build with helper
+                    expr = FTS5Index.build_fts_expression(["fts", "python"],
+                                                          prefix=True, operator="OR")
         """
-        match_expr = self._build_match_expr(query)
+        match_expr = self._build_match_expr(query, fts_expression)
         if match_expr is None:
             return {}
 
@@ -878,6 +905,7 @@ class FTS5Index:
         query: str,
         doc_ids: list[str] | None = None,
         top_k: int = 10,
+        fts_expression: Optional[str] = None,
     ) -> list[str]:
         """Convenience: return top-k node IDs ranked by FTS5 score.
 
@@ -888,11 +916,14 @@ class FTS5Index:
             query: search query
             doc_ids: optional filter to specific documents
             top_k: max results
+            fts_expression: raw FTS5 MATCH expression (overrides query tokenization).
+                Use for prefix matching, boolean operators, NEAR(), etc.
+                Example: ``fts_expression="config*"`` matches config, configuration, ...
 
         Returns:
             list of node_id strings, highest score first
         """
-        batch = self.score_nodes_batch(query, doc_ids=doc_ids)
+        batch = self.score_nodes_batch(query, doc_ids=doc_ids, fts_expression=fts_expression)
         all_scored: list[tuple[str, float]] = []
         for nscores in batch.values():
             all_scored.extend(nscores.items())
@@ -1129,6 +1160,7 @@ class FTS5Index:
         operator: str = "OR",
         column: Optional[str] = None,
         near_distance: Optional[int] = None,
+        prefix: bool = False,
     ) -> str:
         """Build FTS5 match expression from keyword list.
 
@@ -1137,13 +1169,25 @@ class FTS5Index:
             operator: "AND" | "OR" | "NOT" (first keyword AND NOT others)
             column: optional column filter (e.g. "title", "body")
             near_distance: if set, uses NEAR(kw1 kw2, N) syntax
+            prefix: if True, append ``*`` to each term for prefix matching.
+                Prefix matching allows partial token matches: "conf*" matches
+                "config", "configuration", "confirm", etc. Useful for
+                autocomplete-style search or when query tokens may be substrings
+                of indexed terms (e.g. "fts*" matches both "fts" and "fts5").
 
         Returns:
             FTS5 match expression string
 
-        Examples:
+        Examples::
+
             build_fts_expression(["python", "async"], "AND")
             -> "python AND async"
+
+            build_fts_expression(["fts"], prefix=True)
+            -> "fts*"   # matches fts, fts5, ftsearch, ...
+
+            build_fts_expression(["fts", "python"], prefix=True, operator="OR")
+            -> "fts* OR python*"
 
             build_fts_expression(["machine", "learning"], column="title")
             -> "title : (machine OR learning)"
@@ -1162,7 +1206,10 @@ class FTS5Index:
                 # Tokenize for CJK
                 tokenized = _tokenize_for_fts(cleaned)
                 if tokenized.strip():
-                    safe_kws.append(tokenized.strip())
+                    term = tokenized.strip()
+                    if prefix:
+                        term = term + "*"
+                    safe_kws.append(term)
 
         if not safe_kws:
             return ""

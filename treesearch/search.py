@@ -347,6 +347,7 @@ async def search(
     include_ancestors: bool = False,
     merge_strategy: str = "interleave",
     search_mode: Optional[str] = None,
+    fts_expression: Optional[str] = None,
     **kwargs,
 ) -> dict:
     """
@@ -368,6 +369,29 @@ async def search(
                        (tree for documents/markdown/pdf, flat for code)
                      - flat: FTS5-only ranking
                      - tree: Best-First Search over document trees (always uses tree walk)
+        fts_expression: raw FTS5 MATCH expression (overrides automatic query tokenization).
+                     Supports full FTS5 syntax: prefix matching (*), AND/OR/NOT,
+                     NEAR(), column filters, and phrase search.
+
+                     Examples::
+
+                         # Prefix match: "fts" matches fts, fts5, ftsearch, ...
+                         await search(query, docs, fts_expression="fts*")
+
+                         # Multi-term prefix OR
+                         await search(query, docs, fts_expression="fts* OR python*")
+
+                         # Exact phrase
+                         await search(query, docs, fts_expression='"machine learning"')
+
+                         # Column-scoped + prefix
+                         await search(query, docs, fts_expression="title : config*")
+
+                         # Build with helper
+                         expr = FTS5Index.build_fts_expression(
+                             ["fts", "python"], prefix=True, operator="OR"
+                         )
+                         await search(query, docs, fts_expression=expr)
 
     Returns:
         dict with 'documents' (list), 'query' (str), 'flat_nodes' (list),
@@ -415,7 +439,9 @@ async def search(
                 scorer_fts = get_fts_index(db_path=cfg.fts_db_path or None, weights=weights)
                 # Batch score ALL docs in one SQL query (no doc_id filter)
                 all_doc_ids = list(doc_map.keys())
-                all_scores = scorer_fts.score_nodes_batch(query, doc_ids=all_doc_ids)
+                all_scores = scorer_fts.score_nodes_batch(
+                    query, doc_ids=all_doc_ids, fts_expression=fts_expression
+                )
 
                 # Derive routing from batch results: rank docs by max node score
                 doc_max_scores = []
@@ -460,6 +486,7 @@ async def search(
                     text_mode=text_mode,
                     include_ancestors=include_ancestors,
                     merge_strategy=merge_strategy,
+                    fts_expression=fts_expression,
                 )
                 return result
 
@@ -508,6 +535,7 @@ async def search(
             text_mode=text_mode,
             include_ancestors=include_ancestors,
             merge_strategy=merge_strategy,
+            fts_expression=fts_expression,
         )
         return result
 
@@ -518,6 +546,7 @@ async def search(
         text_mode=text_mode,
         include_ancestors=include_ancestors,
         merge_strategy=merge_strategy,
+        fts_expression=fts_expression,
     )
     return result
 
@@ -532,6 +561,7 @@ async def _search_tree_mode(
     include_ancestors: bool = False,
     merge_strategy: str = "interleave",
     fts_score_map: dict[str, dict[str, float]] | None = None,
+    fts_expression: Optional[str] = None,
 ) -> dict:
     """Tree search mode: anchor retrieval -> tree walk -> path aggregation.
 
@@ -539,6 +569,8 @@ async def _search_tree_mode(
         fts_score_map: pre-computed {doc_id: {node_id: score}}. If provided,
             skips scorer.score_nodes_batch() call (fast path when routing and
             scoring are merged). If None, scores are computed from scorer.
+        fts_expression: raw FTS5 MATCH expression passed to score_nodes_batch.
+            Ignored when fts_score_map is provided.
     """
     from .tree_searcher import TreeSearcher
 
@@ -547,7 +579,9 @@ async def _search_tree_mode(
         fts_score_map = {}
         doc_ids = [doc.doc_id for doc in selected]
         if hasattr(scorer, "score_nodes_batch"):
-            fts_score_map = scorer.score_nodes_batch(query, doc_ids=doc_ids)
+            fts_score_map = scorer.score_nodes_batch(
+                query, doc_ids=doc_ids, fts_expression=fts_expression
+            )
         else:
             for doc in selected:
                 scores = scorer.score_nodes(query, doc.doc_id)
@@ -654,27 +688,48 @@ async def _search_flat_mode(
     text_mode: str = "full",
     include_ancestors: bool = False,
     merge_strategy: str = "interleave",
+    fts_expression: Optional[str] = None,
 ) -> dict:
     """Flat search mode (original behavior): FTS5 scoring -> rank -> return."""
-    async def _search_doc(doc: Document) -> dict:
-        nodes = []
-        if scorer is not None:
-            score_map = scorer.score_nodes(query, doc.doc_id)
-            for nid, score in sorted(score_map.items(), key=lambda x: -x[1]):
+    # When fts_expression is provided, use batch scoring so the expression applies
+    # to all documents in a single SQL call.
+    if fts_expression and hasattr(scorer, "score_nodes_batch"):
+        doc_ids = [doc.doc_id for doc in selected]
+        batch = scorer.score_nodes_batch(query, doc_ids=doc_ids, fts_expression=fts_expression)
+        doc_results = []
+        for doc in selected:
+            nscores = batch.get(doc.doc_id, {})
+            nodes = []
+            for nid, score in sorted(nscores.items(), key=lambda x: -x[1])[:max_nodes_per_doc]:
                 full_node = doc.get_node_by_id(nid)
                 nodes.append({
                     "node_id": nid,
                     "title": full_node.get("title", "") if full_node else "",
                     "score": round(score, 4),
                 })
-                if len(nodes) >= max_nodes_per_doc:
-                    break
+            _attach_node_fields(nodes, doc, text_mode=text_mode, include_ancestors=include_ancestors)
+            if nodes:
+                doc_results.append({"doc_id": doc.doc_id, "doc_name": doc.doc_name, "nodes": nodes})
+    else:
+        async def _search_doc(doc: Document) -> dict:
+            nodes = []
+            if scorer is not None:
+                score_map = scorer.score_nodes(query, doc.doc_id)
+                for nid, score in sorted(score_map.items(), key=lambda x: -x[1]):
+                    full_node = doc.get_node_by_id(nid)
+                    nodes.append({
+                        "node_id": nid,
+                        "title": full_node.get("title", "") if full_node else "",
+                        "score": round(score, 4),
+                    })
+                    if len(nodes) >= max_nodes_per_doc:
+                        break
 
-        _attach_node_fields(nodes, doc, text_mode=text_mode, include_ancestors=include_ancestors)
-        return {"doc_id": doc.doc_id, "doc_name": doc.doc_name, "nodes": nodes}
+            _attach_node_fields(nodes, doc, text_mode=text_mode, include_ancestors=include_ancestors)
+            return {"doc_id": doc.doc_id, "doc_name": doc.doc_name, "nodes": nodes}
 
-    raw_results = await asyncio.gather(*(_search_doc(d) for d in selected))
-    doc_results = list(raw_results)
+        raw_results = await asyncio.gather(*(_search_doc(d) for d in selected))
+        doc_results = list(raw_results)
 
     merged = _merge_doc_results(doc_results, merge_strategy)
 

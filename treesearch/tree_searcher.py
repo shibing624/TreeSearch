@@ -131,6 +131,7 @@ class TreeSearcher:
         self,
         query: str,
         documents: list[Document],
+        fts_expression: str | None = None,
     ) -> dict[str, dict[str, float]]:
         """Compute FTS5 scores via batch query (single SQL).
 
@@ -140,6 +141,11 @@ class TreeSearcher:
 
         Uses self._fts_index if provided (e.g., benchmark with custom index),
         otherwise falls back to the global singleton from get_fts_index().
+
+        Args:
+            fts_expression: optional raw FTS5 MATCH expression (overrides query
+                tokenization). Use for prefix matching, boolean operators, etc.
+                Example: ``fts_expression="config*"`` matches config, configuration, ...
         """
         if self._fts_index is not None:
             fts_index = self._fts_index
@@ -158,13 +164,14 @@ class TreeSearcher:
             for doc_id in unindexed:
                 fts_index.index_document(doc_map[doc_id])
         doc_ids = [d.doc_id for d in documents]
-        return fts_index.score_nodes_batch(query, doc_ids=doc_ids)
+        return fts_index.score_nodes_batch(query, doc_ids=doc_ids, fts_expression=fts_expression)
 
     def search(
         self,
         query: str,
         documents: list[Document],
         fts_score_map: dict[str, dict[str, float]] | None = None,
+        fts_expression: str | None = None,
     ) -> tuple[list[PathResult], list[dict]]:
         """Run tree search across documents.
 
@@ -176,6 +183,20 @@ class TreeSearcher:
                 (single SQL query — fast path). Passing a dict is supported for
                 backward compatibility or custom scoring, but the internal path is
                 preferred for performance.
+            fts_expression: raw FTS5 MATCH expression passed to score_nodes_batch.
+                Overrides automatic query tokenization. Useful for prefix matching,
+                boolean operators, NEAR(), column filters, etc.
+                Ignored when ``fts_score_map`` is provided.
+
+                Examples::
+
+                    # Prefix match: "fts" matches fts, fts5, ftsearch, ...
+                    searcher.search(query, docs, fts_expression="fts*")
+
+                    # Build with helper
+                    expr = FTS5Index.build_fts_expression(["fts", "python"],
+                                                          prefix=True, operator="OR")
+                    searcher.search(query, docs, fts_expression=expr)
 
         Returns:
             (paths, flat_nodes) where:
@@ -184,7 +205,7 @@ class TreeSearcher:
         """
         # Auto-compute FTS5 scores if not provided (recommended fast path)
         if fts_score_map is None:
-            fts_score_map = self._auto_score(query, documents)
+            fts_score_map = self._auto_score(query, documents, fts_expression=fts_expression)
 
         plan = build_query_plan(query)
         all_paths: list[PathResult] = []
