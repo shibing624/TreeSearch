@@ -26,6 +26,31 @@ Millisecond-latency search over tens of thousands of documents and large codebas
 pip install -U pytreesearch
 ```
 
+### Rust CLI
+
+The Rust CLI is distributed separately from the Python package. If you want a standalone command-line tool without installing Python dependencies:
+
+```bash
+cargo install treesearch
+ts --help
+```
+
+For users who don't have Rust installed, prebuilt binaries are published on [GitHub Releases](https://github.com/shibing624/TreeSearch/releases) for:
+
+- `x86_64-unknown-linux-gnu`
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+- `x86_64-pc-windows-msvc`
+
+Each release is built automatically when a tag like `v0.1.0` is pushed:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+After the workflow finishes, download the archive for your platform from GitHub Releases and run the `ts` binary directly.
+
 ## Quick Start
 
 ```python

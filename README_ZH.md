@@ -26,6 +26,31 @@
 pip install -U pytreesearch
 ```
 
+### Rust CLI
+
+Rust CLI 与 Python 包分开发布。如果你只想安装独立命令行工具，不想带上 Python 依赖，可以直接：
+
+```bash
+cargo install treesearch
+ts --help
+```
+
+如果本机没有 Rust，也可以直接从 [GitHub Releases](https://github.com/shibing624/TreeSearch/releases) 下载预编译二进制，当前覆盖：
+
+- `x86_64-unknown-linux-gnu`
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+- `x86_64-pc-windows-msvc`
+
+每次推送类似 `v0.1.0` 的 tag 后，GitHub Actions 会自动构建并上传这些平台的二进制：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+工作流完成后，直接到 GitHub Releases 下载对应平台的压缩包，解压后运行 `ts` 即可。
+
 ## 快速开始
 
 ```python
