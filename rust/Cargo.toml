@@ -1,6 +1,6 @@
 [package]
 name = "treesearch"
-version = "1.0.6"
+version = "1.0.7"
 edition = "2021"
 description = "Structure-aware document search CLI. Fast keyword matching over hierarchical document trees."
 license = "Apache-2.0"
