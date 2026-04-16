@@ -1,0 +1,74 @@
+[package]
+name = "treesearch"
+version = "0.1.0"
+edition = "2021"
+description = "Structure-aware document search CLI. Fast keyword matching over hierarchical document trees."
+license = "Apache-2.0"
+repository = "https://github.com/shibing624/TreeSearch"
+keywords = ["search", "fts5", "bm25", "tree", "cli"]
+categories = ["command-line-utilities", "text-processing"]
+
+[[bin]]
+name = "ts"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# SQLite + FTS5
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# File discovery
+ignore = "0.4"
+
+# Parallel processing
+rayon = "1.10"
+
+# CJK tokenization
+jieba-rs = "0.7"
+
+# Regex
+regex = "1"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Terminal output
+termcolor = "1"
+unicode-width = "0.1"
+
+# Progress bar
+indicatif = "0.17"
+
+# HTML parsing
+scraper = "0.21"
+ego-tree = "0.9"
+
+# Markdown parsing
+pulldown-cmark = "0.12"
+
+# String matching (aho-corasick for fast multi-pattern search)
+aho-corasick = "1"
+
+# Content hashing
+md-5 = "0.10"
+
+# File locking
+fs2 = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
