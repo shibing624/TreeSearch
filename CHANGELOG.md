@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-04-16
+
+### Added
+- Rust crate metadata now includes a crate-specific README, homepage, and documentation links for crates.io and docs.rs.
+- GitHub Release distribution is configured for the Rust CLI, with prebuilt binaries planned for macOS (Apple Silicon and Intel), Linux x86_64, and Windows x86_64.
+
+### Changed
+- Aligned the Python package and Rust CLI to release under version `1.0.6`.
+- README installation guidance now clearly separates Python library usage, Python CLI usage, and Rust CLI usage.
+- Rust CLI auto mode now follows the same source-type, tree-depth, and ratio-threshold routing logic as the Python implementation.
+
 ## [0.8.0] - 2026-03-12
 
 ### Added
