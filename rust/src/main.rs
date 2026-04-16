@@ -19,7 +19,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Search query (shorthand for `ts search <QUERY> [PATH]`)
+    /// Search query (supports auth* prefix and *auth* contains matching)
     #[arg(value_name = "QUERY")]
     query: Option<String>,
 
@@ -51,6 +51,14 @@ struct Cli {
     #[arg(long, value_enum, global = true)]
     mode: Option<ModeChoice>,
 
+    /// Treat the provided query as a raw regex pattern
+    #[arg(long, global = true)]
+    regex: bool,
+
+    /// Pass a raw FTS5 expression directly
+    #[arg(long, global = true, value_name = "EXPR")]
+    fts_expression: Option<String>,
+
     /// Maximum results to return
     #[arg(short = 'n', long, default_value = "15", global = true)]
     max_results: usize,
@@ -60,8 +68,8 @@ struct Cli {
 enum Commands {
     /// Search for a query in indexed documents
     Search {
-        /// Search query
-        query: String,
+        /// Search query (supports auth* prefix and *auth* contains matching)
+        query: Option<String>,
         /// Path to search (default: current directory)
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -95,7 +103,7 @@ enum ModeChoice {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = normalize_cli(Cli::parse());
 
     // Initialize logging
     let filter = match cli.verbose {
@@ -138,27 +146,103 @@ fn run(cli: Cli) -> Result<()> {
             ModeChoice::Tree => SearchMode::Tree,
         };
     }
+    let regex = cli.regex;
+    let fts_expression = cli.fts_expression.clone();
+    let query = cli.query.clone();
+    let path = cli.path.clone();
+    let verbose = cli.verbose;
+    let follow = cli.follow;
+    let max_results = cli.max_results;
 
     match cli.command {
         Some(Commands::Search { query, path }) => {
-            cmd_search(&query, &path, &config, &*format, cli.verbose, cli.follow, cli.max_results)
+            let request = resolve_search_request(query, fts_expression.clone(), regex)?;
+            cmd_search(
+                &request.query,
+                request.fts_expression.as_deref(),
+                request.regex,
+                &path,
+                &config,
+                &*format,
+                verbose,
+                follow,
+                max_results,
+            )
         }
-        Some(Commands::Index { path }) => cmd_index(&path, &config, cli.follow),
+        Some(Commands::Index { path }) => cmd_index(&path, &config, follow),
         Some(Commands::Stats { path }) => cmd_stats(&path),
         None => {
-            // Shorthand: `ts "query" [path]`
-            if let Some(query) = cli.query {
-                let path = cli.path.unwrap_or_else(|| PathBuf::from("."));
-                cmd_search(&query, &path, &config, &*format, cli.verbose, cli.follow, cli.max_results)
+            let request = resolve_search_request(query, fts_expression, regex);
+            if let Ok(request) = request {
+                let path = path.unwrap_or_else(|| PathBuf::from("."));
+                cmd_search(
+                    &request.query,
+                    request.fts_expression.as_deref(),
+                    request.regex,
+                    &path,
+                    &config,
+                    &*format,
+                    verbose,
+                    follow,
+                    max_results,
+                )
             } else {
                 eprintln!("Usage: ts <QUERY> [PATH]");
+                eprintln!("       ts --fts-expression <EXPR> [PATH]");
                 eprintln!("       ts search <QUERY> [PATH]");
+                eprintln!("       ts search --fts-expression <EXPR> [PATH]");
                 eprintln!("       ts index [PATH]");
                 eprintln!("       ts stats [PATH]");
                 process::exit(1);
             }
         }
     }
+}
+
+struct SearchRequest {
+    query: String,
+    fts_expression: Option<String>,
+    regex: bool,
+}
+
+fn normalize_cli(mut cli: Cli) -> Cli {
+    if cli.command.is_none() && cli.fts_expression.is_some() && cli.query.is_some() && cli.path.is_none() {
+        cli.path = cli.query.take().map(PathBuf::from);
+    }
+    if let Some(Commands::Search { query, path }) = cli.command.as_mut() {
+        if cli.fts_expression.is_some() && query.is_some() && *path == PathBuf::from(".") {
+            *path = PathBuf::from(query.take().unwrap());
+        }
+    }
+    cli
+}
+
+fn resolve_search_request(
+    query: Option<String>,
+    fts_expression: Option<String>,
+    regex: bool,
+) -> Result<SearchRequest> {
+    if regex && fts_expression.is_some() {
+        anyhow::bail!("--regex and --fts-expression cannot be used together");
+    }
+    if query.is_some() && fts_expression.is_some() {
+        anyhow::bail!("pass either a query or --fts-expression, not both");
+    }
+    if let Some(expr) = fts_expression {
+        return Ok(SearchRequest {
+            query: String::new(),
+            fts_expression: Some(expr),
+            regex: false,
+        });
+    }
+    if let Some(query) = query {
+        return Ok(SearchRequest {
+            query,
+            fts_expression: None,
+            regex,
+        });
+    }
+    anyhow::bail!("a query is required unless --fts-expression is provided")
 }
 
 fn db_path_for(root: &PathBuf) -> PathBuf {
@@ -168,6 +252,8 @@ fn db_path_for(root: &PathBuf) -> PathBuf {
 
 fn cmd_search(
     query: &str,
+    fts_expression: Option<&str>,
+    regex: bool,
     path: &PathBuf,
     config: &TreeSearchConfig,
     format: &dyn OutputFormat,
@@ -200,7 +286,7 @@ fn cmd_search(
 
     // Search
     let start = std::time::Instant::now();
-    let mut results = search::search(query, &documents, &fts, config)?;
+    let mut results = search::search_with_options(query, &documents, &fts, config, fts_expression, regex)?;
     let search_time = start.elapsed();
 
     results.truncate(max_results);
@@ -282,4 +368,61 @@ fn cmd_stats(path: &PathBuf) -> Result<()> {
 
     fts.close();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_default_parser_accepts_regex_flag() {
+        let cli = normalize_cli(Cli::parse_from(["ts", "--regex", "auth.*", "."]));
+        assert!(cli.regex);
+        assert_eq!(cli.query.as_deref(), Some("auth.*"));
+    }
+
+    #[test]
+    fn test_default_parser_accepts_fts_expression() {
+        let cli = normalize_cli(Cli::parse_from(["ts", "--fts-expression", "auth*", "."]));
+        assert_eq!(cli.fts_expression.as_deref(), Some("auth*"));
+        assert_eq!(cli.query, None);
+    }
+
+    #[test]
+    fn test_search_subcommand_accepts_regex_flag() {
+        let cli = normalize_cli(Cli::parse_from(["ts", "search", "--regex", "auth.*"]));
+        match cli.command {
+            Some(Commands::Search { query, .. }) => {
+                assert_eq!(query.as_deref(), Some("auth.*"));
+                assert!(cli.regex);
+            }
+            _ => panic!("expected search command"),
+        }
+    }
+
+    #[test]
+    fn test_search_subcommand_accepts_fts_expression() {
+        let cli = normalize_cli(Cli::parse_from(["ts", "search", "--fts-expression", "auth*"]));
+        match cli.command {
+            Some(Commands::Search { query, .. }) => {
+                assert_eq!(query, None);
+                assert_eq!(cli.fts_expression.as_deref(), Some("auth*"));
+            }
+            _ => panic!("expected search command"),
+        }
+    }
+
+    #[test]
+    fn test_search_subcommand_accepts_fts_expression_with_path() {
+        let cli = normalize_cli(Cli::parse_from(["ts", "search", "--fts-expression", "auth*", "src"]));
+        match cli.command {
+            Some(Commands::Search { query, path }) => {
+                assert_eq!(query, None);
+                assert_eq!(path, PathBuf::from("src"));
+                assert_eq!(cli.fts_expression.as_deref(), Some("auth*"));
+            }
+            _ => panic!("expected search command"),
+        }
+    }
 }

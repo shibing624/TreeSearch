@@ -119,6 +119,140 @@ class TestSearch:
             assert "title" in node
             assert "score" in node
 
+    @pytest.fixture
+    def wildcard_documents(self):
+        return [
+            Document(
+                doc_id="exact",
+                doc_name="Exact Auth",
+                source_type="text",
+                structure=[{
+                    "title": "Exact Auth",
+                    "summary": "Contains the exact auth token.",
+                    "node_id": "0",
+                    "text": "Use auth tokens for API access.",
+                }],
+            ),
+            Document(
+                doc_id="prefix",
+                doc_name="Authentication Guide",
+                source_type="text",
+                structure=[{
+                    "title": "Authentication",
+                    "summary": "Authentication and authorizer details.",
+                    "node_id": "0",
+                    "text": "Authentication depends on an authorizer service.",
+                }],
+            ),
+            Document(
+                doc_id="contains",
+                doc_name="OAuth Guide",
+                source_type="text",
+                structure=[{
+                    "title": "OAuth",
+                    "summary": "OAuth callback handling.",
+                    "node_id": "0",
+                    "text": "OAuth callbacks must be validated.",
+                }],
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_plain_query_preserves_existing_exact_term_behavior(self, wildcard_documents):
+        result = await search(
+            query="auth",
+            documents=wildcard_documents,
+            top_k_docs=3,
+            max_nodes_per_doc=5,
+            search_mode="flat",
+        )
+        doc_names = {doc["doc_name"] for doc in result["documents"]}
+        assert "Exact Auth" in doc_names
+        assert "Authentication Guide" not in doc_names
+        assert "OAuth Guide" not in doc_names
+
+    @pytest.mark.asyncio
+    async def test_suffix_star_query_uses_prefix_matching(self, wildcard_documents):
+        result = await search(
+            query="auth*",
+            documents=wildcard_documents,
+            top_k_docs=3,
+            max_nodes_per_doc=5,
+            search_mode="flat",
+        )
+        doc_names = {doc["doc_name"] for doc in result["documents"]}
+        assert "Exact Auth" in doc_names
+        assert "Authentication Guide" in doc_names
+        assert "OAuth Guide" not in doc_names
+
+    @pytest.mark.asyncio
+    async def test_explicit_fts_expression_uses_prefix_matching(self, wildcard_documents):
+        result = await search(
+            query="ignored",
+            documents=wildcard_documents,
+            top_k_docs=3,
+            max_nodes_per_doc=5,
+            search_mode="flat",
+            fts_expression="auth*",
+        )
+        doc_names = {doc["doc_name"] for doc in result["documents"]}
+        assert "Exact Auth" in doc_names
+        assert "Authentication Guide" in doc_names
+        assert "OAuth Guide" not in doc_names
+
+    @pytest.mark.asyncio
+    async def test_surrounded_star_query_uses_contains_matching(self, wildcard_documents):
+        result = await search(
+            query="*auth*",
+            documents=wildcard_documents,
+            top_k_docs=3,
+            max_nodes_per_doc=5,
+            search_mode="flat",
+        )
+        doc_names = {doc["doc_name"] for doc in result["documents"]}
+        assert "Exact Auth" in doc_names
+        assert "Authentication Guide" in doc_names
+        assert "OAuth Guide" in doc_names
+
+    @pytest.mark.asyncio
+    async def test_explicit_regex_query_uses_regex_matching(self, wildcard_documents):
+        result = await search(
+            query="o?auth",
+            documents=wildcard_documents,
+            top_k_docs=3,
+            max_nodes_per_doc=5,
+            search_mode="flat",
+            regex=True,
+        )
+        doc_names = {doc["doc_name"] for doc in result["documents"]}
+        assert "Exact Auth" in doc_names
+        assert "Authentication Guide" in doc_names
+        assert "OAuth Guide" in doc_names
+
+    @pytest.mark.asyncio
+    async def test_explicit_regex_invalid_pattern_raises_value_error(self, wildcard_documents):
+        with pytest.raises(ValueError, match="Invalid regex pattern"):
+            await search(
+                query="(",
+                documents=wildcard_documents,
+                top_k_docs=3,
+                max_nodes_per_doc=5,
+                search_mode="flat",
+                regex=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_unsupported_wildcard_shape_falls_back_to_plain_query(self, wildcard_documents):
+        result = await search(
+            query="au*th",
+            documents=wildcard_documents,
+            top_k_docs=3,
+            max_nodes_per_doc=5,
+            search_mode="flat",
+        )
+        doc_names = {doc["doc_name"] for doc in result["documents"]}
+        assert doc_names == {"Exact Auth"}
+
 
 class TestSearchSync:
     def test_sync_wrapper(self, sample_tree_structure):

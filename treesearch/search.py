@@ -7,6 +7,7 @@
               No LLM calls at search time. All scoring is done via FTS5.
 """
 import asyncio
+from dataclasses import dataclass
 import logging
 import os
 import re
@@ -16,6 +17,73 @@ from .tree import Document
 from .config import get_config
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class QueryMode:
+    original_query: str
+    effective_query: str
+    fts_expression: Optional[str] = None
+    regex_pattern: Optional[str] = None
+
+
+_RE_PREFIX_WILDCARD = re.compile(r"^[^*\s]+\*$")
+_RE_CONTAINS_WILDCARD = re.compile(r"^\*[^*\s]+\*$")
+
+
+def _classify_query_mode(query: str, fts_expression: Optional[str] = None) -> QueryMode:
+    """Classify narrow wildcard patterns for shared Python CLI/API behavior.
+
+    Supported special forms:
+    - ``auth*`` -> FTS5 prefix expression
+    - ``*auth*`` -> regex contains matching
+
+    All other inputs fall back to plain query semantics.
+    Explicit ``fts_expression`` always wins.
+    """
+    stripped = query.strip()
+    if fts_expression is not None:
+        return QueryMode(
+            original_query=query,
+            effective_query=query,
+            fts_expression=fts_expression,
+        )
+    if _RE_CONTAINS_WILDCARD.fullmatch(stripped):
+        term = stripped[1:-1]
+        return QueryMode(
+            original_query=query,
+            effective_query=term,
+            regex_pattern=re.escape(term),
+        )
+    if _RE_PREFIX_WILDCARD.fullmatch(stripped):
+        term = stripped[:-1]
+        return QueryMode(
+            original_query=query,
+            effective_query=term,
+            fts_expression=stripped,
+        )
+    return QueryMode(original_query=query, effective_query=query)
+
+
+def _route_regex_documents(
+    query: str,
+    documents: list[Document],
+    top_k_docs: int,
+) -> tuple[list[Document], "GrepFilter"]:
+    """Route documents for regex-contains wildcard queries using GrepFilter scores."""
+    regex_filter = GrepFilter(documents, use_regex=True)
+    if len(documents) <= 1:
+        return documents, regex_filter
+
+    ranked_docs: list[tuple[float, Document]] = []
+    for doc in documents:
+        scores = regex_filter.score_nodes(query, doc.doc_id)
+        if scores:
+            ranked_docs.append((max(scores.values()), doc))
+
+    ranked_docs.sort(key=lambda item: -item[0])
+    selected = [doc for _, doc in ranked_docs[:top_k_docs]]
+    return selected, GrepFilter(selected, use_regex=True)
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +416,7 @@ async def search(
     merge_strategy: str = "interleave",
     search_mode: Optional[str] = None,
     fts_expression: Optional[str] = None,
+    regex: bool = False,
     **kwargs,
 ) -> dict:
     """
@@ -398,6 +467,24 @@ async def search(
         optionally 'paths' (list) when search_mode='tree'.
     """
     cfg = get_config()
+    if regex and fts_expression is not None:
+        raise ValueError("regex and fts_expression cannot be used together")
+    if regex:
+        try:
+            re.compile(query)
+        except re.error as exc:
+            raise ValueError(f"Invalid regex pattern: {query}") from exc
+    query_mode = (
+        QueryMode(
+            original_query=query,
+            effective_query=query,
+            regex_pattern=query,
+        )
+        if regex
+        else _classify_query_mode(query, fts_expression=fts_expression)
+    )
+    effective_query = query_mode.effective_query
+    effective_fts_expression = query_mode.fts_expression
 
     # Resolve defaults from config
     if top_k_docs is None:
@@ -407,8 +494,25 @@ async def search(
     if search_mode is None:
         search_mode = cfg.search_mode
 
+    selected: list[Document] | None = None
+    scorer = pre_filter
+
+    if query_mode.regex_pattern and pre_filter is None:
+        selected, scorer = _route_regex_documents(
+            query_mode.regex_pattern, documents, top_k_docs
+        )
+        if not selected:
+            return {
+                "documents": [],
+                "query": query,
+                "flat_nodes": [],
+                "mode": "tree" if search_mode == "tree" else "flat",
+            }
+
     # Stage 1: document routing (FTS5-based)
-    if len(documents) <= 1:
+    if selected is not None:
+        pass
+    elif len(documents) <= 1:
         selected = documents
     else:
         from .fts import get_fts_index
@@ -421,7 +525,11 @@ async def search(
         # Fast path for tree mode: use score_nodes_batch without doc filter
         # to get both routing AND scoring in a single FTS5 query, avoiding
         # the separate search_with_aggregation call (saves ~2.5ms/query).
-        if (search_mode == "tree" or (search_mode == "auto" and documents)) and pre_filter is None:
+        if (
+            search_mode == "tree"
+            or (search_mode == "auto" and documents)
+            or effective_fts_expression is not None
+        ) and pre_filter is None:
             # Check if any doc needs grep (code source types)
             from .parsers import get_prefilters_for_source_type
             use_grep = any(
@@ -440,7 +548,7 @@ async def search(
                 # Batch score ALL docs in one SQL query (no doc_id filter)
                 all_doc_ids = list(doc_map.keys())
                 all_scores = scorer_fts.score_nodes_batch(
-                    query, doc_ids=all_doc_ids, fts_expression=fts_expression
+                    effective_query, doc_ids=all_doc_ids, fts_expression=effective_fts_expression
                 )
 
                 # Derive routing from batch results: rank docs by max node score
@@ -465,13 +573,14 @@ async def search(
                     # Filter score map to selected docs only
                     fts_score_map = {did: all_scores[did] for did in routed_ids if did in all_scores}
                     result = await _search_tree_mode(
-                        query, selected, scorer_fts, cfg,
+                        effective_query, selected, scorer_fts, cfg,
                         max_nodes_per_doc=max_nodes_per_doc,
                         text_mode=text_mode,
                         include_ancestors=include_ancestors,
                         merge_strategy=merge_strategy,
                         fts_score_map=fts_score_map,
                     )
+                    result["query"] = query
                     return result
                 # else fall through to flat mode below
 
@@ -481,17 +590,22 @@ async def search(
                 logger.debug("Selected %d documents: %s", len(selected), [d.doc_name for d in selected])
 
                 result = await _search_flat_mode(
-                    query, selected, scorer, cfg,
+                    effective_query, selected, scorer, cfg,
                     max_nodes_per_doc=max_nodes_per_doc,
                     text_mode=text_mode,
                     include_ancestors=include_ancestors,
                     merge_strategy=merge_strategy,
-                    fts_expression=fts_expression,
+                    fts_expression=effective_fts_expression,
                 )
+                result["query"] = query
                 return result
 
         # Standard routing path (for non-tree modes or grep-needing docs)
-        agg = fts_index.search_with_aggregation(query, top_k=top_k_docs)
+        agg = fts_index.search_with_aggregation(
+            effective_query,
+            top_k=top_k_docs,
+            fts_expression=effective_fts_expression,
+        )
         if agg:
             relevant_ids = {a["doc_id"] for a in agg}
             selected = [d for d in documents if d.doc_id in relevant_ids]
@@ -503,7 +617,6 @@ async def search(
     logger.debug("Selected %d documents: %s", len(selected), [d.doc_name for d in selected])
 
     # Stage 1.5: Pre-filter scoring (build scorer for both modes)
-    scorer = pre_filter
     if scorer is None and selected:
         from .parsers import get_prefilters_for_source_type
         use_grep = False
@@ -530,24 +643,26 @@ async def search(
 
     if effective_mode == "tree" and scorer is not None:
         result = await _search_tree_mode(
-            query, selected, scorer, cfg,
+            effective_query, selected, scorer, cfg,
             max_nodes_per_doc=max_nodes_per_doc,
             text_mode=text_mode,
             include_ancestors=include_ancestors,
             merge_strategy=merge_strategy,
-            fts_expression=fts_expression,
+            fts_expression=effective_fts_expression,
         )
+        result["query"] = query
         return result
 
     # Flat mode (original behavior, or auto-resolved from auto mode)
     result = await _search_flat_mode(
-        query, selected, scorer, cfg,
+        effective_query, selected, scorer, cfg,
         max_nodes_per_doc=max_nodes_per_doc,
         text_mode=text_mode,
         include_ancestors=include_ancestors,
         merge_strategy=merge_strategy,
-        fts_expression=fts_expression,
+        fts_expression=effective_fts_expression,
     )
+    result["query"] = query
     return result
 
 

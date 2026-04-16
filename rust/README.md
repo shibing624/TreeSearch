@@ -52,6 +52,31 @@ Inspect index stats:
 ts stats .
 ```
 
+## Wildcard Queries
+
+`ts` supports a narrow set of wildcard shortcuts:
+
+- `auth*`: prefix match
+- `*auth*`: contains-style regex match
+- other wildcard shapes currently fall back to regular query parsing
+
+For explicit control:
+
+- `ts --regex "o?auth" .` treats the query as a raw regex
+- `ts search --regex "o?auth"` runs indexed search in regex mode
+- `ts --fts-expression "auth*" .` passes a raw FTS5 expression
+- `ts search --fts-expression "auth*"` runs indexed search with raw FTS5 syntax
+- Invalid regex patterns raise an explicit error instead of silently returning no results
+
+Examples:
+
+```bash
+ts "auth*" .
+ts "*auth*" .
+ts --regex "o?auth" .
+ts --fts-expression "auth*" .
+```
+
 ## Search Modes
 
 `ts` supports three search modes:

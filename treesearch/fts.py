@@ -710,16 +710,17 @@ class FTS5Index:
         query: str,
         group_by_doc: bool = True,
         top_k: int = 20,
+        fts_expression: Optional[str] = None,
     ) -> list[dict]:
         """Search with SQL aggregation capabilities.
 
         Returns per-document aggregated results: total hits, max score, avg score.
         """
         if not group_by_doc:
-            return self.search(query, top_k=top_k)
+            return self.search(query, top_k=top_k, fts_expression=fts_expression)
 
         # Two-step: first get all matched nodes with scores, then aggregate in Python
-        results = self.search(query, top_k=200)
+        results = self.search(query, top_k=200, fts_expression=fts_expression)
         if not results:
             return []
 

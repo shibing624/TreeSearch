@@ -53,6 +53,19 @@ treesearch index --paths src/ docs/
 treesearch search --db ./index.db --query "auth"
 ```
 
+Wildcard shortcuts supported in the Python CLI:
+
+- `auth*` for prefix matching
+- `*auth*` for contains-style regex matching
+- Other wildcard shapes currently fall back to regular query parsing
+
+Explicit query controls:
+
+- `treesearch --regex "o?auth" src/` to treat the query as raw regex
+- `treesearch search --query "o?auth" --regex` for indexed search with regex
+- `treesearch --fts-expression "auth*" src/` to pass a raw FTS5 expression
+- `treesearch search --fts-expression "auth*"` for indexed search with raw FTS5 syntax
+
 ### Rust CLI
 
 Use this when you want a standalone CLI without depending on a Python runtime. The Rust binary name is `ts`.
@@ -70,6 +83,20 @@ If you don't have Rust installed, download a prebuilt binary from the current st
 - Windows x86_64: `x86_64-pc-windows-msvc`
 
 After extracting the archive, run `ts` directly.
+
+Wildcard shortcuts supported in the Rust CLI:
+
+- `auth*` for prefix matching
+- `*auth*` for contains-style regex matching
+- Other wildcard shapes currently fall back to regular query parsing
+
+Explicit query controls:
+
+- `ts --regex "o?auth" .` to treat the query as raw regex
+- `ts search --regex "o?auth"` for indexed search with regex
+- `ts --fts-expression "auth*" .` to pass a raw FTS5 expression
+- `ts search --fts-expression "auth*"` for indexed search with raw FTS5 syntax
+- Invalid regex patterns now raise an explicit error instead of silently returning no results
 
 ## Quick Start
 

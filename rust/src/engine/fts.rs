@@ -566,7 +566,17 @@ impl FTS5Index {
         doc_id: Option<&str>,
         top_k: usize,
     ) -> Result<Vec<FtsResult>> {
-        let match_expr = match self.build_match_expr(query, None) {
+        self.search_with_expr(query, doc_id, top_k, None)
+    }
+
+    pub fn search_with_expr(
+        &self,
+        query: &str,
+        doc_id: Option<&str>,
+        top_k: usize,
+        fts_expression: Option<&str>,
+    ) -> Result<Vec<FtsResult>> {
+        let match_expr = match self.build_match_expr(query, fts_expression) {
             Some(e) => e,
             None => return Ok(Vec::new()),
         };
@@ -785,7 +795,17 @@ impl FTS5Index {
         doc_ids: Option<&[String]>,
         ancestor_decay: f64,
     ) -> Result<HashMap<String, HashMap<String, f64>>> {
-        let match_expr = match self.build_match_expr(query, None) {
+        self.score_nodes_batch_with_expr(query, doc_ids, ancestor_decay, None)
+    }
+
+    pub fn score_nodes_batch_with_expr(
+        &self,
+        query: &str,
+        doc_ids: Option<&[String]>,
+        ancestor_decay: f64,
+        fts_expression: Option<&str>,
+    ) -> Result<HashMap<String, HashMap<String, f64>>> {
+        let match_expr = match self.build_match_expr(query, fts_expression) {
             Some(e) => e,
             None => return Ok(HashMap::new()),
         };

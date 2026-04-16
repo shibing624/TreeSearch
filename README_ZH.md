@@ -53,6 +53,19 @@ treesearch index --paths src/ docs/
 treesearch search --db ./index.db --query "auth"
 ```
 
+Python CLI 当前支持的通配符快捷语法：
+
+- `auth*`：前缀匹配
+- `*auth*`：包含式 regex 匹配
+- 其他通配符形态当前会回退到普通查询解析
+
+显式查询控制：
+
+- `treesearch --regex "o?auth" src/`：把查询直接当作 regex
+- `treesearch search --query "o?auth" --regex`：对已建索引执行 regex 查询
+- `treesearch --fts-expression "auth*" src/`：直接传原始 FTS5 表达式
+- `treesearch search --fts-expression "auth*"`：对已建索引执行原始 FTS5 查询
+
 ### Rust CLI
 
 适合直接在命令行里搜索项目、文档和代码库，不依赖 Python 运行时；命令名是 `ts`。
@@ -72,6 +85,20 @@ ts --help
 - Windows x86_64 下载 `x86_64-pc-windows-msvc`
 
 下载后解压，直接运行 `ts` 即可。
+
+Rust CLI 当前支持的通配符快捷语法：
+
+- `auth*`：前缀匹配
+- `*auth*`：包含式 regex 匹配
+- 其他通配符形态当前会回退到普通查询解析
+
+显式查询控制：
+
+- `ts --regex "o?auth" .`：把查询直接当作 regex
+- `ts search --regex "o?auth"`：对已建索引执行 regex 查询
+- `ts --fts-expression "auth*" .`：直接传原始 FTS5 表达式
+- `ts search --fts-expression "auth*"`：对已建索引执行原始 FTS5 查询
+- 无效 regex 会直接报错，不再静默返回空结果
 
 ## 快速开始
 

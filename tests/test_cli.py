@@ -73,6 +73,25 @@ class TestDefaultParser:
         assert args.verbose is True
         assert args.query == "my query"
 
+    def test_with_regex_flag(self):
+        p = _build_default_parser()
+        args = p.parse_args(["--regex", "auth.*", "src/"])
+        assert args.regex is True
+        assert args.query == "auth.*"
+
+    def test_with_fts_expression(self):
+        p = _build_default_parser()
+        args = p.parse_args(["--fts-expression", "auth*", "src/"])
+        assert args.fts_expression == "auth*"
+        assert args.query is None
+
+    def test_with_fts_expression_and_multiple_paths(self):
+        p = _build_default_parser()
+        args = p.parse_args(["--fts-expression", "auth*", "src/", "docs/"])
+        assert args.fts_expression == "auth*"
+        assert args.query is None
+        assert args.paths == ["src/", "docs/"]
+
 
 class TestIndexParser:
     def test_basic(self):
@@ -119,6 +138,17 @@ class TestSearchParser:
         assert args.index_dir == "./indexes"
         assert args.top_k_docs == 3
         assert args.max_nodes == 5
+
+    def test_regex_flag(self):
+        p = _build_search_parser()
+        args = p.parse_args(["--query", "auth.*", "--regex"])
+        assert args.query == "auth.*"
+        assert args.regex is True
+
+    def test_fts_expression(self):
+        p = _build_search_parser()
+        args = p.parse_args(["--fts-expression", "auth*"])
+        assert args.fts_expression == "auth*"
 
 
 class TestLoadDocuments:

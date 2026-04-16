@@ -21,6 +21,17 @@ import time
 logger = logging.getLogger(__name__)
 
 
+class _DefaultArgumentParser(argparse.ArgumentParser):
+    """Default parser with small normalization for explicit query flags."""
+
+    def parse_args(self, args=None, namespace=None):
+        parsed = super().parse_args(args, namespace)
+        if getattr(parsed, "fts_expression", None) and parsed.query:
+            parsed.paths = [parsed.query, *parsed.paths]
+            parsed.query = None
+        return parsed
+
+
 # ---------------------------------------------------------------------------
 # Default command: lazy search (the simplest way to use TreeSearch)
 # ---------------------------------------------------------------------------
@@ -31,24 +42,44 @@ def _run_default(args) -> None:
 
     paths = args.paths
     query = args.query
+    fts_expression = args.fts_expression
     db_path = args.db or "./index.db"
     max_nodes = args.max_nodes
     search_mode = args.search_mode
     show_path = args.show_path
+    regex = args.regex
+
+    if regex and fts_expression is not None:
+        print("Error: --regex and --fts-expression cannot be used together.", file=sys.stderr)
+        sys.exit(2)
 
     if not paths:
         print("Error: no paths specified. Usage: treesearch \"query\" path1 [path2 ...]",
               file=sys.stderr)
         sys.exit(1)
+    if query is None and fts_expression is None:
+        print("Error: query is required unless --fts-expression is provided.", file=sys.stderr)
+        sys.exit(2)
 
     start_time = time.time()
 
     ts = TreeSearch(*paths, db_path=db_path)
-    result = ts.search(query, max_nodes_per_doc=max_nodes, search_mode=search_mode)
+    display_query = fts_expression or query
+    try:
+        result = ts.search(
+            display_query,
+            max_nodes_per_doc=max_nodes,
+            search_mode=search_mode,
+            fts_expression=fts_expression,
+            regex=regex,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
     elapsed = time.time() - start_time
 
     if not result["documents"] or not result["flat_nodes"]:
-        print(f"No results found for: {query}")
+        print(f"No results found for: {display_query}")
         return
 
     mode = result.get("mode", "flat")
@@ -173,8 +204,20 @@ def _add_search_args(sub: argparse.ArgumentParser) -> None:
                      help="Directory containing the database file (default: ./indexes)")
     sub.add_argument("--db", type=str, default="",
                      help="Path to SQLite database file (default: {index_dir}/index.db)")
-    sub.add_argument("--query", type=str, required=True,
-                     help="Search query")
+    query_group = sub.add_mutually_exclusive_group(required=True)
+    query_group.add_argument(
+        "--query",
+        type=str,
+        help="Search query. Supports auth* (prefix) and *auth* (contains regex)",
+    )
+    query_group.add_argument(
+        "--fts-expression",
+        type=str,
+        dest="fts_expression",
+        help="Raw FTS5 expression, e.g. auth* or \"auth NEAR/5 token\"",
+    )
+    sub.add_argument("--regex", action="store_true",
+                     help="Treat --query as a raw regex pattern")
     sub.add_argument("--top-k-docs", type=int, default=3,
                      help="Max documents to search (default: 3)")
     sub.add_argument("--max-nodes", type=int, default=5,
@@ -207,17 +250,29 @@ async def _run_search(args) -> None:
     documents = _load_documents_from_dir(args.index_dir, db=args.db)
     print(f"Loaded {len(documents)} document(s)\n")
 
-    print(f"Query: {args.query}")
+    if args.regex and args.fts_expression is not None:
+        print("Error: --regex and --fts-expression cannot be used together.", file=sys.stderr)
+        sys.exit(2)
+
+    display_query = args.fts_expression or args.query
+
+    print(f"Query: {display_query}")
     print("---")
 
     start_time = time.time()
-    result = await search(
-        query=args.query,
-        documents=documents,
-        top_k_docs=args.top_k_docs,
-        max_nodes_per_doc=args.max_nodes,
-        search_mode=args.search_mode,
-    )
+    try:
+        result = await search(
+            query=args.query or args.fts_expression,
+            documents=documents,
+            top_k_docs=args.top_k_docs,
+            max_nodes_per_doc=args.max_nodes,
+            search_mode=args.search_mode,
+            fts_expression=args.fts_expression,
+            regex=args.regex,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
     elapsed = time.time() - start_time
 
     if not result["documents"]:
@@ -282,7 +337,7 @@ _SUBCOMMANDS = {"index", "search"}
 
 def _build_default_parser() -> argparse.ArgumentParser:
     """Parser for default mode: treesearch "query" path1 path2 ..."""
-    p = argparse.ArgumentParser(
+    p = _DefaultArgumentParser(
         prog="treesearch",
         description=(
             "TreeSearch: Structure-aware document retrieval.\n\n"
@@ -297,9 +352,13 @@ def _build_default_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     p.add_argument("query", nargs="?", default=None,
-                   help="Search query")
+                   help="Search query. Supports auth* (prefix) and *auth* (contains regex)")
     p.add_argument("paths", nargs="*", default=[],
                    help="Files, directories, or glob patterns to search")
+    p.add_argument("--regex", action="store_true",
+                   help="Treat the positional query as a raw regex pattern")
+    p.add_argument("--fts-expression", type=str, default=None, dest="fts_expression",
+                   help="Raw FTS5 expression, e.g. auth* or \"auth NEAR/5 token\"")
     p.add_argument("--db", type=str, default="",
                    help="Path to SQLite database file (default: ./index.db)")
     p.add_argument("--max-nodes", type=int, default=5,
@@ -379,7 +438,7 @@ def main(argv: list[str] | None = None):
         args = parser.parse_args(argv)
         level = logging.DEBUG if args.verbose else logging.WARNING
         logging.basicConfig(level=level, format="%(levelname)s - %(name)s - %(message)s")
-        if args.query:
+        if args.query or args.fts_expression:
             _run_default(args)
         else:
             parser.print_help()
