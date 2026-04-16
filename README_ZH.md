@@ -22,34 +22,56 @@
 
 ## 安装
 
+### Python 库
+
+适合在 Python 代码里调用，例如脚本、服务端检索、数据处理流程：
+
 ```bash
 pip install -U pytreesearch
 ```
 
+安装后在代码中使用：
+
+```python
+from treesearch import TreeSearch
+```
+
+### Python CLI
+
+适合已经在用 Python 环境，但更想直接在命令行里搜索文件、文档和代码库：
+
+```bash
+pip install -U pytreesearch
+treesearch --help
+```
+
+常见用法：
+
+```bash
+treesearch "认证系统如何工作？" src/ docs/
+treesearch index --paths src/ docs/
+treesearch search --db ./index.db --query "auth"
+```
+
 ### Rust CLI
 
-Rust CLI 与 Python 包分开发布。如果你只想安装独立命令行工具，不想带上 Python 依赖，可以直接：
+适合直接在命令行里搜索项目、文档和代码库，不依赖 Python 运行时；命令名是 `ts`。
+
+如果你本机已经装了 Rust：
 
 ```bash
 cargo install treesearch
 ts --help
 ```
 
-如果本机没有 Rust，也可以直接从 [GitHub Releases](https://github.com/shibing624/TreeSearch/releases) 下载预编译二进制，当前覆盖：
+如果本机没有 Rust，也可以直接从 [GitHub Releases](https://github.com/shibing624/TreeSearch/releases) 下载预编译二进制：
 
-- `x86_64-unknown-linux-gnu`
-- `x86_64-apple-darwin`
-- `aarch64-apple-darwin`
-- `x86_64-pc-windows-msvc`
+- macOS Apple Silicon（M1 / M2 / M3 / M4）下载 `aarch64-apple-darwin`
+- macOS Intel 下载 `x86_64-apple-darwin`
+- Linux x86_64 下载 `x86_64-unknown-linux-gnu`
+- Windows x86_64 下载 `x86_64-pc-windows-msvc`
 
-每次推送类似 `v0.1.0` 的 tag 后，GitHub Actions 会自动构建并上传这些平台的二进制：
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-工作流完成后，直接到 GitHub Releases 下载对应平台的压缩包，解压后运行 `ts` 即可。
+下载后解压，直接运行 `ts` 即可。
 
 ## 快速开始
 

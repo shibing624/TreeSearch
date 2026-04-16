@@ -22,34 +22,54 @@ Millisecond-latency search over tens of thousands of documents and large codebas
 
 ## Installation
 
+### Python Library
+
+Use this when you want to call TreeSearch from Python code, such as scripts, backend services, or data pipelines:
+
 ```bash
 pip install -U pytreesearch
 ```
 
+Then use it in code:
+
+```python
+from treesearch import TreeSearch
+```
+
+### Python CLI
+
+Use this when you're already in a Python environment but want a command-line tool right away:
+
+```bash
+pip install -U pytreesearch
+treesearch --help
+```
+
+Common commands:
+
+```bash
+treesearch "How does auth work?" src/ docs/
+treesearch index --paths src/ docs/
+treesearch search --db ./index.db --query "auth"
+```
+
 ### Rust CLI
 
-The Rust CLI is distributed separately from the Python package. If you want a standalone command-line tool without installing Python dependencies:
+Use this when you want a standalone CLI without depending on a Python runtime. The Rust binary name is `ts`.
 
 ```bash
 cargo install treesearch
 ts --help
 ```
 
-For users who don't have Rust installed, prebuilt binaries are published on [GitHub Releases](https://github.com/shibing624/TreeSearch/releases) for:
+If you don't have Rust installed, download a prebuilt binary from [GitHub Releases](https://github.com/shibing624/TreeSearch/releases):
 
-- `x86_64-unknown-linux-gnu`
-- `x86_64-apple-darwin`
-- `aarch64-apple-darwin`
-- `x86_64-pc-windows-msvc`
+- macOS Apple Silicon (M1 / M2 / M3 / M4): `aarch64-apple-darwin`
+- macOS Intel: `x86_64-apple-darwin`
+- Linux x86_64: `x86_64-unknown-linux-gnu`
+- Windows x86_64: `x86_64-pc-windows-msvc`
 
-Each release is built automatically when a tag like `v0.1.0` is pushed:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-After the workflow finishes, download the archive for your platform from GitHub Releases and run the `ts` binary directly.
+After extracting the archive, run `ts` directly.
 
 ## Quick Start
 
