@@ -9,9 +9,50 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::config::{SearchMode, TreeSearchConfig};
-use crate::document::{Document, SearchResult};
+use crate::document::{Document, Node, SearchResult, SourceType};
 use crate::engine::fts::FTS5Index;
 use crate::engine::tree_walker::TreeSearcher;
+
+// ---------------------------------------------------------------------------
+// Auto mode constants (ported from Python search.py)
+// ---------------------------------------------------------------------------
+
+/// Which source types benefit from tree walk.
+fn benefits_from_tree(source_type: &SourceType) -> bool {
+    matches!(source_type, SourceType::Markdown | SourceType::Json | SourceType::Yaml | SourceType::Toml | SourceType::Html)
+}
+
+/// Minimum tree depth for a doc to truly benefit from tree walk.
+/// Docs with depth ≤ 1 (flat list of nodes) won't gain anything from BFS walk.
+const MIN_TREE_DEPTH: u32 = 2;
+
+/// If ≥30% of docs benefit from tree, use tree for all.
+const TREE_RATIO_THRESHOLD: f64 = 0.3;
+
+/// Check if a document's tree has enough depth for tree walk to help.
+fn has_meaningful_depth(doc: &Document) -> bool {
+    fn max_depth(node: &Node, current: u32) -> u32 {
+        if node.children.is_empty() {
+            return current;
+        }
+        node.children
+            .iter()
+            .map(|child| max_depth(child, current + 1))
+            .max()
+            .unwrap_or(current)
+    }
+
+    if doc.structure.is_empty() {
+        return false;
+    }
+    let depth = doc
+        .structure
+        .iter()
+        .map(|root| max_depth(root, 1))
+        .max()
+        .unwrap_or(0);
+    depth >= MIN_TREE_DEPTH
+}
 
 /// Unified search entry point.
 pub fn search(
@@ -33,19 +74,41 @@ pub fn search(
 }
 
 /// Resolve Auto mode to concrete Flat or Tree.
+///
+/// Strategy (ported from Python `_resolve_auto_mode`):
+/// 1. Count docs whose source_type benefits from tree walk (markdown, json, yaml, toml, html).
+/// 2. For those, verify they actually have meaningful depth (≥ MIN_TREE_DEPTH).
+///    A markdown file with no headings is effectively flat.
+/// 3. If the ratio of truly-hierarchical docs ≥ TREE_RATIO_THRESHOLD (30%) → tree mode.
+///    Otherwise → flat mode.
+///
+/// This avoids "1 markdown among 50 code files → tree for everything" while
+/// still activating tree mode when it helps.
 fn resolve_mode(mode: SearchMode, documents: &[Document]) -> SearchMode {
     match mode {
         SearchMode::Flat => SearchMode::Flat,
         SearchMode::Tree => SearchMode::Tree,
         SearchMode::Auto => {
-            // Auto: use tree mode for documents with heading hierarchy,
-            // flat for code-only documents
-            let has_hierarchy = documents.iter().any(|doc| {
-                doc.structure.iter().any(|root| !root.children.is_empty())
-            });
-            if has_hierarchy {
+            if documents.is_empty() {
+                return SearchMode::Flat;
+            }
+            let total = documents.len();
+            let tree_count = documents
+                .iter()
+                .filter(|doc| benefits_from_tree(&doc.source_type) && has_meaningful_depth(doc))
+                .count();
+            let ratio = tree_count as f64 / total as f64;
+            if ratio >= TREE_RATIO_THRESHOLD {
+                tracing::debug!(
+                    "Auto mode → tree: {}/{} docs ({:.0}%) have meaningful hierarchy",
+                    tree_count, total, ratio * 100.0,
+                );
                 SearchMode::Tree
             } else {
+                tracing::debug!(
+                    "Auto mode → flat: {}/{} docs ({:.0}%) have hierarchy (threshold {:.0}%)",
+                    tree_count, total, ratio * 100.0, TREE_RATIO_THRESHOLD * 100.0,
+                );
                 SearchMode::Flat
             }
         }
