@@ -1,9 +1,12 @@
 [package]
 name = "treesearch"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Structure-aware document search CLI. Fast keyword matching over hierarchical document trees."
 license = "Apache-2.0"
+readme = "README.md"
+homepage = "https://github.com/shibing624/TreeSearch"
+documentation = "https://docs.rs/treesearch"
 repository = "https://github.com/shibing624/TreeSearch"
 keywords = ["search", "fts5", "bm25", "tree", "cli"]
 categories = ["command-line-utilities", "text-processing"]
