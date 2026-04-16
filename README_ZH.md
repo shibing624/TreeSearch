@@ -64,7 +64,7 @@ cargo install treesearch
 ts --help
 ```
 
-如果本机没有 Rust，也可以直接从 [GitHub Releases](https://github.com/shibing624/TreeSearch/releases) 下载预编译二进制：
+如果本机没有 Rust，也可以直接从当前稳定版本 [v1.0.6](https://github.com/shibing624/TreeSearch/releases/tag/v1.0.6) 下载预编译二进制：
 
 - macOS Apple Silicon（M1 / M2 / M3 / M4）下载 `aarch64-apple-darwin`
 - macOS Intel 下载 `x86_64-apple-darwin`

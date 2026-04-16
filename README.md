@@ -62,7 +62,7 @@ cargo install treesearch
 ts --help
 ```
 
-If you don't have Rust installed, download a prebuilt binary from [GitHub Releases](https://github.com/shibing624/TreeSearch/releases):
+If you don't have Rust installed, download a prebuilt binary from the current stable release: [v1.0.6](https://github.com/shibing624/TreeSearch/releases/tag/v1.0.6).
 
 - macOS Apple Silicon (M1 / M2 / M3 / M4): `aarch64-apple-darwin`
 - macOS Intel: `x86_64-apple-darwin`
