@@ -70,14 +70,24 @@ Python CLI 当前支持的通配符快捷语法：
 
 适合直接在命令行里搜索项目、文档和代码库，不依赖 Python 运行时；命令名是 `ts`。
 
-如果你本机已经装了 Rust：
+**方式 1：Homebrew（macOS / Linux 推荐）**
+
+```bash
+brew tap shibing624/tap
+brew install treesearch
+ts --help
+```
+
+**方式 2：Cargo（任何装了 Rust 工具链的平台）**
 
 ```bash
 cargo install treesearch
 ts --help
 ```
 
-如果本机没有 Rust，也可以直接从当前稳定版本 [v1.0.7](https://github.com/shibing624/TreeSearch/releases/tag/v1.0.7) 下载预编译二进制：
+**方式 3：直接下载预编译二进制**
+
+从当前稳定版本 [v1.0.8](https://github.com/shibing624/TreeSearch/releases/tag/v1.0.8) 下载：
 
 - macOS Apple Silicon（M1 / M2 / M3 / M4）下载 `aarch64-apple-darwin`
 - macOS Intel 下载 `x86_64-apple-darwin`

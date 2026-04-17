@@ -70,12 +70,24 @@ Explicit query controls:
 
 Use this when you want a standalone CLI without depending on a Python runtime. The Rust binary name is `ts`.
 
+**Option 1: Homebrew (macOS / Linux, recommended)**
+
+```bash
+brew tap shibing624/tap
+brew install treesearch
+ts --help
+```
+
+**Option 2: Cargo (any platform with Rust toolchain)**
+
 ```bash
 cargo install treesearch
 ts --help
 ```
 
-If you don't have Rust installed, download a prebuilt binary from the current stable release: [v1.0.7](https://github.com/shibing624/TreeSearch/releases/tag/v1.0.7).
+**Option 3: Prebuilt binary download**
+
+Download from the current stable release: [v1.0.8](https://github.com/shibing624/TreeSearch/releases/tag/v1.0.8).
 
 - macOS Apple Silicon (M1 / M2 / M3 / M4): `aarch64-apple-darwin`
 - macOS Intel: `x86_64-apple-darwin`

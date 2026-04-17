@@ -8,21 +8,31 @@ This crate publishes the `ts` executable.
 
 ## Install
 
+**Homebrew (macOS / Linux)**
+
+```bash
+brew tap shibing624/tap
+brew install treesearch
+ts --help
+```
+
+**Cargo**
+
 ```bash
 cargo install treesearch
 ts --help
 ```
 
-Prebuilt binaries are also published on GitHub Releases:
+**Prebuilt binaries**
+
+Download from GitHub Releases:
 
 - Linux: `x86_64-unknown-linux-gnu`
 - macOS Intel: `x86_64-apple-darwin`
 - macOS Apple Silicon: `aarch64-apple-darwin`
 - Windows: `x86_64-pc-windows-msvc`
 
-Release page:
-
-<https://github.com/shibing624/TreeSearch/releases>
+Release page: <https://github.com/shibing624/TreeSearch/releases>
 
 ## Why TreeSearch
 

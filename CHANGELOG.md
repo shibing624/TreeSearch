@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] - 2026-04-16
+
+### Added
+- Homebrew tap distribution for the Rust CLI: `brew tap shibing624/tap && brew install treesearch`. The formula is published automatically by `cargo-dist` on every release tag to [shibing624/homebrew-tap](https://github.com/shibing624/homebrew-tap).
+
 ## [1.0.7] - 2026-04-16
 
 ### Added
