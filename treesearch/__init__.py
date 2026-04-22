@@ -13,7 +13,7 @@ Quick Start::
     ts = TreeSearch("./docs/")
     results = ts.search("How to configure voice calls?")
 """
-__version__ = "1.0.8"
+__version__ = "1.1.0"
 
 # ============================================================================
 # FTS5 Compatibility: Use pysqlite3 on systems without FTS5 support
@@ -58,7 +58,10 @@ from treesearch.treesearch import TreeSearch
 from treesearch.indexer import build_index, md_to_tree, text_to_tree, IndexStats
 from treesearch.search import search, search_sync, GrepFilter
 from treesearch.tree import Document, load_index, load_documents, save_index, flatten_tree, print_toc
-from treesearch.config import TreeSearchConfig, get_config, set_config, reset_config
+from treesearch.config import (
+    TreeSearchConfig, get_config, set_config, reset_config,
+    INDEX_SCHEMA_VERSION,
+)
 from treesearch.fts import FTS5Index
 from treesearch.tree_searcher import TreeSearcher, PathResult
 from treesearch.heuristics import build_query_plan, QueryPlan
@@ -76,6 +79,7 @@ __all__ = [
     "Document", "load_index", "load_documents", "save_index", "flatten_tree", "print_toc",
     # Config
     "TreeSearchConfig", "get_config", "set_config", "reset_config",
+    "INDEX_SCHEMA_VERSION",
     # FTS5
     "FTS5Index",
 ]

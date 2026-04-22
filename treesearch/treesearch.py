@@ -456,35 +456,29 @@ class TreeSearch:
 
         from .fts import FTS5Index
         fts = FTS5Index(db_path=self.db_path)
-        removed = 0
 
+        # Resolve every target → doc_id first, then issue a single batched
+        # transaction. Resolution order per-target: source_path → abspath → doc_id.
+        resolved_ids: list[str] = []
         for target in paths_or_ids:
-            # 1. Try source_path exact match.
             doc_id = fts.get_doc_id_by_source_path(target)
-
-            # 2. Try absolute path.
             if doc_id is None:
                 abs_target = os.path.abspath(target)
                 if abs_target != target:
                     doc_id = fts.get_doc_id_by_source_path(abs_target)
-
-            # 3. Try treating the argument itself as a doc_id.
-            if doc_id is None:
-                if fts.is_document_indexed(target):
-                    doc_id = target
-
+            if doc_id is None and fts.is_document_indexed(target):
+                doc_id = target
             if doc_id is None:
                 logger.warning("delete: %r not found in index (checked source_path and doc_id)", target)
                 continue
+            resolved_ids.append(doc_id)
 
-            if fts.delete_document(doc_id):
-                removed += 1
-                # Keep self.documents in sync.
-                self.documents = [d for d in self.documents if d.doc_id != doc_id]
-
+        removed = fts.delete_documents(resolved_ids) if resolved_ids else 0
         fts.close()
 
         if removed:
+            removed_set = set(resolved_ids)
+            self.documents = [d for d in self.documents if d.doc_id not in removed_set]
             logger.info("Deleted %d document(s) from index %r", removed, self.db_path)
         return removed
 
@@ -526,7 +520,6 @@ class TreeSearch:
 
         fts = FTS5Index(db_path=out)
         for doc in self.documents:
-            fts.save_document(doc)
             fts.index_document(doc)
         fts.close()
 

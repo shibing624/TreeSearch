@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pytreesearch"
-version = "1.0.8"
+version = "1.1.0"
 description = "Structure-aware document retrieval. FTS5/BM25 keyword matching over document trees."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -39,10 +39,18 @@ excel = ["openpyxl>=3.1"]
 html = ["beautifulsoup4>=4.12"]
 fts5 = ["pysqlite3-binary>=0.5"]
 treesitter = ["tree-sitter-languages>=1.10"]
+watch = ["watchdog>=3.0"]
 langchain = ["langchain-core>=0.1"]
 llamaindex = ["llama-index-core>=0.10"]
 integrations = ["langchain-core>=0.1", "llama-index-core>=0.10"]
-all = ["pymupdf>=1.24", "python-docx>=0.8", "openpyxl>=3.1", "beautifulsoup4>=4.12", "tree-sitter-languages>=1.10"]
+all = [
+    "pymupdf>=1.24",
+    "python-docx>=0.8",
+    "openpyxl>=3.1",
+    "beautifulsoup4>=4.12",
+    "tree-sitter-languages>=1.10",
+    "watchdog>=3.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",

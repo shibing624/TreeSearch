@@ -7,6 +7,7 @@ Supports batch indexing via ``build_index()`` which accepts glob patterns and
 processes multiple files concurrently.
 """
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -968,6 +969,11 @@ class IndexStats:
         db_path: Path to the SQLite database file.
         db_size_bytes: Size of the database file on disk (0 for in-memory).
         failed_paths: List of file paths that failed to index.
+        node_diff: Aggregate node-level diff across reindexed docs:
+            ``{"added", "changed", "removed", "kept"}``.
+            Useful for verifying incremental behaviour.
+        pruned_paths: Source paths whose documents were removed from the
+            index because the file no longer exists in the indexed scope.
     """
     total_files: int = 0
     indexed_files: int = 0
@@ -979,6 +985,10 @@ class IndexStats:
     db_path: str = ""
     db_size_bytes: int = 0
     failed_paths: list = field(default_factory=list)
+    node_diff: dict = field(
+        default_factory=lambda: {"added": 0, "changed": 0, "removed": 0, "kept": 0}
+    )
+    pruned_paths: list = field(default_factory=list)
 
     def summary(self) -> str:
         """Return a human-readable summary string."""
@@ -989,7 +999,15 @@ class IndexStats:
         lines.append(f"  Skipped (unchanged):    {self.skipped_files}")
         if self.failed_files:
             lines.append(f"  Failed:                 {self.failed_files}")
+        if self.pruned_paths:
+            lines.append(f"  Pruned (orphans):       {len(self.pruned_paths)}")
         lines.append(f"  Total nodes generated:  {self.total_nodes}")
+        nd = self.node_diff
+        if any(nd.values()):
+            lines.append(
+                f"  Node-level diff:        +{nd['added']}  ~{nd['changed']}  "
+                f"-{nd['removed']}  (kept {nd['kept']})"
+            )
         lines.append(f"  Total time:             {self.total_time_s:.3f}s")
         if self.db_path:
             size_str = _format_size(self.db_size_bytes)
@@ -1030,20 +1048,109 @@ def _format_size(size_bytes: int) -> str:
 # Batch indexing API
 # ============================================================================
 
-def _file_hash(fp: str) -> str:
-    """Compute a fast fingerprint for incremental indexing.
+class _NullLock:
+    """No-op lock context for in-memory or non-POSIX paths."""
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+    def release(self) -> None:
+        return None
 
-    Uses (mtime_ns, size) as a lightweight proxy instead of reading the
-    entire file for MD5.  This is orders-of-magnitude faster on network
-    filesystems (NFS / CIFS) and still catches all real edits.
 
-    Returns empty string if the file does not exist (e.g. deleted after glob).
+def _acquire_index_lock(db_path: str):
+    """Acquire an exclusive advisory lock on ``{db_path}.lock``.
+
+    Returns a handle whose ``release()`` method closes the file (which
+    releases the lock). Returns a no-op handle for in-memory or non-existent
+    paths, and on platforms without ``fcntl`` (e.g. Windows).
     """
+    if not db_path or db_path == ":memory:":
+        return _NullLock()
+    try:
+        import fcntl
+    except ImportError:
+        return _NullLock()
+
+    lock_path = db_path + ".lock"
+    os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
+    f = open(lock_path, "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    except OSError as e:
+        f.close()
+        logger.warning("Failed to acquire index lock %s: %s", lock_path, e)
+        return _NullLock()
+
+    class _Handle:
+        def __init__(self, fh):
+            self._fh = fh
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            self.release()
+            return False
+        def release(self) -> None:
+            if self._fh is not None:
+                try:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                finally:
+                    self._fh.close()
+                    self._fh = None
+
+    return _Handle(f)
+
+
+def _file_hash(fp: str, mode: Optional[str] = None) -> str:
+    """Compute a fingerprint for incremental indexing.
+
+    Format: ``"v{INDEX_SCHEMA_VERSION}:{mode}:{payload}"`` so that:
+      - bumping ``INDEX_SCHEMA_VERSION`` invalidates every stored hash, forcing a
+        clean rebuild after a parser/tokenizer/schema change.
+      - switching ``fingerprint_mode`` between ``stat`` and ``content`` likewise
+        invalidates so users can opt-in safely.
+
+    Modes:
+      - ``stat`` (default): ``(mtime_ns:size)`` — fast, catches normal edits.
+      - ``content``: full md5 for files <``content_fingerprint_size_threshold``;
+        large files are sampled at head/middle/tail with
+        ``content_fingerprint_sample_bytes`` per region. Robust against
+        ``touch``/CI-replay scenarios at the cost of one read per file.
+
+    Returns empty string if the file does not exist.
+    """
+    from .config import INDEX_SCHEMA_VERSION, get_config
+    cfg = get_config()
+    if mode is None:
+        mode = cfg.fingerprint_mode
+
     try:
         st = os.stat(fp)
     except (FileNotFoundError, OSError):
         return ""
-    return f"{st.st_mtime_ns}:{st.st_size}"
+
+    if mode == "content":
+        threshold = cfg.content_fingerprint_size_threshold
+        sample = cfg.content_fingerprint_sample_bytes
+        h = hashlib.md5()
+        try:
+            with open(fp, "rb") as f:
+                if st.st_size <= threshold:
+                    h.update(f.read())
+                else:
+                    h.update(f.read(sample))
+                    if st.st_size > 2 * sample:
+                        f.seek(st.st_size // 2)
+                        h.update(f.read(sample))
+                    f.seek(max(0, st.st_size - sample))
+                    h.update(f.read(sample))
+        except OSError:
+            return ""
+        payload = f"{st.st_size}:{h.hexdigest()}"
+    else:
+        payload = f"{st.st_mtime_ns}:{st.st_size}"
+
+    return f"v{INDEX_SCHEMA_VERSION}:{mode}:{payload}"
 
 
 async def build_index(
@@ -1060,6 +1167,7 @@ async def build_index(
     ignore_dirs: frozenset[str] = DEFAULT_IGNORE_DIRS,
     respect_gitignore: bool = True,
     max_files: int = MAX_DIR_FILES,
+    prune: Optional[bool] = None,
     **kwargs,
 ) -> list[Document]:
     """
@@ -1077,6 +1185,10 @@ async def build_index(
         ignore_dirs: directory names to skip during recursive walk
         respect_gitignore: honour ``.gitignore`` files when walking directories
         max_files: safety cap on files discovered per directory walk
+        prune: if True, delete documents whose source files are no longer
+            reachable through ``paths`` (orphan cleanup). When ``None``,
+            defaults to True iff at least one entry of ``paths`` is a directory
+            or recursive glob (full-scope reindex), False otherwise.
         **kwargs: passed through to individual parsers
 
     Returns:
@@ -1113,17 +1225,98 @@ async def build_index(
     if not expanded:
         raise FileNotFoundError(f"No files found for patterns: {paths}")
 
-    # Incremental indexing: batch check file hashes via DB
+    # Resolve prune policy: full-scope walks default to pruning orphans.
+    explicit_prune = prune is not None
+    if prune is None:
+        full_scope = any(
+            os.path.isdir(p) or "**" in p
+            for p in paths
+        )
+        prune = full_scope and cfg.prune_orphans_on_directory
+
+    # Open DB with advisory file lock so concurrent build_index() calls on the
+    # same DB serialize cleanly instead of racing on writes.
     fts = FTS5Index(db_path=db_path)
+    _lock_handle = _acquire_index_lock(db_path)
+
+    # Incremental indexing: batch check file hashes via DB
     to_index = []
     skipped = []
     file_hashes = {}
+    pruned_paths: list[str] = []
 
     if not force:
         # Batch fetch all stored hashes in one query (instead of N queries)
         all_meta = fts.get_all_index_meta()
     else:
         all_meta = {}
+
+    # Reverse index for move/rename detection (file_hash → source_path).
+    # Only entries with the *current* schema version count as candidates —
+    # cross-version matches must always re-index.
+    hash_to_old_path: dict[str, str] = {}
+    from .config import INDEX_SCHEMA_VERSION
+    _current_prefix = f"v{INDEX_SCHEMA_VERSION}:"
+    for sp, fh in all_meta.items():
+        if fh.startswith(_current_prefix):
+            hash_to_old_path.setdefault(fh, sp)
+
+    # Pre-pass: detect moves/renames and remap source_path BEFORE pruning,
+    # so the orphan cleanup below doesn't drop a doc whose file just moved.
+    if not force and hash_to_old_path:
+        for fp in expanded:
+            abs_fp = os.path.abspath(fp)
+            if abs_fp in all_meta:
+                continue  # path unchanged → not a move
+            fh = _file_hash(abs_fp)
+            if not fh:
+                continue
+            old_path = hash_to_old_path.get(fh)
+            if old_path and old_path != abs_fp and not os.path.isfile(old_path):
+                moved_doc_id = fts.get_doc_id_by_source_path(old_path)
+                if moved_doc_id:
+                    new_doc_id = os.path.splitext(os.path.basename(abs_fp))[0]
+                    # Keep doc identity aligned with the new basename so that
+                    # the skipped-doc backfill below (keyed by basename) and
+                    # any caller looking the doc up by name after build_index
+                    # both see consistent values.
+                    if fts.rename_document(moved_doc_id, new_doc_id, new_doc_id, abs_fp):
+                        fts.set_index_meta(abs_fp, fh)
+                        all_meta.pop(old_path, None)
+                        all_meta[abs_fp] = fh
+                        hash_to_old_path[fh] = abs_fp
+                        logger.info(
+                            "Detected moved file: %s -> %s (doc_id %s -> %s)",
+                            old_path, abs_fp, moved_doc_id, new_doc_id,
+                        )
+                    else:
+                        logger.debug(
+                            "Move-detection skipped for %s -> %s "
+                            "(doc_id collision); will full re-index",
+                            old_path, abs_fp,
+                        )
+
+    # Orphan cleanup: docs in DB whose source_path is not in the new scope.
+    # Implicit prune (defaulted from a directory walk): only drop docs whose
+    # files are also gone from disk — preserves unrelated files for partial
+    # reindexes.
+    # Explicit `prune=True`: reduce the index to exactly `paths`.
+    if prune and all_meta:
+        expanded_abs = {os.path.abspath(p) for p in expanded}
+        prune_doc_ids: list[str] = []
+        for stored_path in list(all_meta.keys()):
+            if stored_path in expanded_abs:
+                continue
+            if not explicit_prune and os.path.isfile(stored_path):
+                continue
+            doc_id = fts.get_doc_id_by_source_path(stored_path)
+            if doc_id:
+                prune_doc_ids.append(doc_id)
+                pruned_paths.append(stored_path)
+                all_meta.pop(stored_path, None)
+        if prune_doc_ids:
+            fts.delete_documents(prune_doc_ids)
+            logger.info("Pruned %d orphan document(s) from index", len(prune_doc_ids))
 
     for fp in expanded:
         abs_fp = os.path.abspath(fp)
@@ -1136,8 +1329,8 @@ async def build_index(
         if not force:
             stored_hash = all_meta.get(abs_fp)
             if stored_hash == fh:
-                name = os.path.splitext(os.path.basename(fp))[0]
-                if fts.is_document_indexed(name):
+                # source_path lookup catches both same-name and moved files.
+                if fts.get_doc_id_by_source_path(abs_fp) is not None:
                     skipped.append(fp)
                     continue
         to_index.append(fp)
@@ -1209,6 +1402,10 @@ async def build_index(
     _COMMIT_BATCH = 500
     _save_bar = tqdm(total=len(expanded), desc="Indexing", unit="file", dynamic_ncols=True)
     _pending_commits = 0
+    # Aggregate node-level diff stats across all reindexed docs.
+    diff_totals = {"added": 0, "changed": 0, "removed": 0, "kept": 0}
+    optimize_threshold = cfg.auto_optimize_threshold
+    docs_since_optimize = 0
     for fp in expanded:
         name = os.path.splitext(os.path.basename(fp))[0]
         _save_bar.set_postfix_str(os.path.basename(fp), refresh=False)
@@ -1222,13 +1419,22 @@ async def build_index(
                 metadata={"source_path": result.get("source_path", "")},
                 source_type=result.get("source_type", ""),
             )
-            fts.save_document(doc, auto_commit=False)
-            fts.index_document(doc, force=True, auto_commit=False)
+            abs_fp = os.path.abspath(fp)
+            file_h = file_hashes.get(abs_fp, "")
+            # index_document writes nodes, fts_nodes, documents AND index_meta
+            # in a single atomic transaction (auto_commit handles batching).
+            fts.index_document(doc, auto_commit=False, file_hash=file_h)
+            d = fts.last_node_diff
+            for k in diff_totals:
+                diff_totals[k] += d[k]
             _pending_commits += 1
-            # Batch commit to reduce fsync overhead
+            docs_since_optimize += 1
             if _pending_commits >= _COMMIT_BATCH:
                 fts.commit()
                 _pending_commits = 0
+            if optimize_threshold and docs_since_optimize >= optimize_threshold:
+                fts.optimize()
+                docs_since_optimize = 0
             logger.debug("Indexed: %s -> %s (doc_id=%s)", fp, db_path, name)
         else:
             # Skipped file: use batch-loaded docs
@@ -1245,11 +1451,9 @@ async def build_index(
         fts.commit()
     _save_bar.close()
 
-    # Batch update metadata only for changed files (single transaction)
-    changed_hashes = {os.path.abspath(fp): file_hashes[os.path.abspath(fp)] for fp in to_index if os.path.abspath(fp) in file_hashes}
-    if changed_hashes:
-        logger.info("Updating file metadata for %d file(s)...", len(changed_hashes))
-        fts.set_index_meta_batch(changed_hashes)
+    # Fold WAL sidecar back into the main DB so long-running daemons don't
+    # accumulate a multi-GB -wal file across many incremental builds.
+    fts.wal_checkpoint("TRUNCATE")
 
     # ---------------------------------------------------------------
     # Build IndexStats
@@ -1293,6 +1497,8 @@ async def build_index(
         db_path=db_path,
         db_size_bytes=db_size,
         failed_paths=_failed_paths,
+        node_diff=diff_totals,
+        pruned_paths=pruned_paths,
     )
 
     # Attach stats to the returned list for easy access
@@ -1304,4 +1510,5 @@ async def build_index(
     doc_list.stats = stats
 
     fts.close()
+    _lock_handle.release()
     return doc_list

@@ -14,14 +14,29 @@ Environment variables:
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Index schema version
+# ---------------------------------------------------------------------------
+# Bump whenever a change in tree builder, tokenizer, FTS schema, or node_id
+# algorithm would invalidate previously-built indexes. The version is folded
+# into every file's fingerprint so old index_meta entries automatically miss
+# and the file is re-indexed on next run.
+#
+# History:
+#   "1" — original (mtime_ns:size) fingerprint with sequential int node_ids.
+#   "2" — stable hash node_ids + node-level diff + atomic per-doc transaction.
+INDEX_SCHEMA_VERSION = "2"
 
 # ---------------------------------------------------------------------------
 # Environment variable names
 # ---------------------------------------------------------------------------
 _ENV_CJK_TOKENIZER = "TREESEARCH_CJK_TOKENIZER"
+_ENV_FINGERPRINT_MODE = "TREESEARCH_FINGERPRINT_MODE"
+_ENV_PRUNE = "TREESEARCH_PRUNE"
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +90,23 @@ class TreeSearchConfig:
     # Tokenizer
     cjk_tokenizer: str = "auto"  # "auto" | "jieba" | "bigram" | "char"
 
+    # Incremental indexing
+    fingerprint_mode: Literal["stat", "content"] = "stat"
+    # "stat":    fast `(mtime_ns:size)` fingerprint. Re-indexes after a `touch`.
+    # "content": samples first/middle/last 64KB of large files (full md5 for
+    #            files <1MB) — robust against `touch`/CI replay; ~1ms cost on small
+    #            files, dozens of ms on multi-GB files. Opt-in.
+    content_fingerprint_size_threshold: int = 1_000_000  # bytes; full md5 below this
+    content_fingerprint_sample_bytes: int = 64 * 1024     # head/mid/tail sample size
+
+    # Auto FTS5 maintenance: run `optimize` every N reindexed documents
+    # within a single build_index call. 0 disables.
+    auto_optimize_threshold: int = 1000
+
+    # Default prune policy when build_index sees a directory in `paths`.
+    # Set to False to never auto-delete orphans even on directory walks.
+    prune_orphans_on_directory: bool = True
+
     @classmethod
     def from_env(cls) -> "TreeSearchConfig":
         """Create config from environment variables, falling back to defaults."""
@@ -83,6 +115,14 @@ class TreeSearchConfig:
         env_cjk = os.getenv(_ENV_CJK_TOKENIZER)
         if env_cjk:
             config.cjk_tokenizer = env_cjk
+
+        env_fp = os.getenv(_ENV_FINGERPRINT_MODE)
+        if env_fp in ("stat", "content"):
+            config.fingerprint_mode = env_fp
+
+        env_prune = os.getenv(_ENV_PRUNE)
+        if env_prune is not None:
+            config.prune_orphans_on_directory = env_prune.lower() in ("1", "true", "yes")
 
         return config
 

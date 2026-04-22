@@ -332,7 +332,76 @@ async def _run_search(args) -> None:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-_SUBCOMMANDS = {"index", "search"}
+_SUBCOMMANDS = {"index", "search", "verify", "watch"}
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: verify (DB consistency check + optional repair)
+# ---------------------------------------------------------------------------
+
+def _add_verify_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--db", required=True, type=str,
+                     help="Path to SQLite database file to verify")
+    sub.add_argument("--repair", action="store_true",
+                     help="Drop orphan rows surfaced by the verify pass")
+    sub.add_argument("--drop-missing-files", action="store_true",
+                     help="(repair only) also delete docs whose source file is gone")
+
+
+def _run_verify(args) -> None:
+    from treesearch.fts import FTS5Index
+
+    if not os.path.isfile(args.db):
+        print(f"DB not found: {args.db}", file=sys.stderr)
+        sys.exit(1)
+
+    fts = FTS5Index(db_path=args.db)
+    report = fts.verify_index()
+    print(f"Index: {args.db}")
+    print(f"  healthy: {report['healthy']}")
+    for k in ("orphan_node_doc_ids", "orphan_fts_doc_ids", "orphan_meta_paths"):
+        items = report[k]
+        if items:
+            print(f"  {k}: {len(items)} ({items[:5]}{'...' if len(items) > 5 else ''})")
+    missing = report["missing_source_paths"]
+    if missing:
+        print(f"  missing_source_paths: {len(missing)} (first: {missing[0]})")
+
+    if args.repair:
+        removed = fts.repair_index(drop_missing_files=args.drop_missing_files)
+        print("Repair summary:")
+        for k, v in removed.items():
+            print(f"  {k}: {v}")
+    fts.close()
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: watch (push-based incremental indexing)
+# ---------------------------------------------------------------------------
+
+def _add_watch_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--paths", nargs="+", required=True,
+                     help="Files or directories to watch (recursive for dirs)")
+    sub.add_argument("--db", type=str, default="./index.db",
+                     help="SQLite database path (default: ./index.db)")
+    sub.add_argument("--debounce", type=float, default=0.5,
+                     help="Coalesce events within this many seconds (default: 0.5)")
+    sub.add_argument("--ext", nargs="*", default=None,
+                     help="Optional extension whitelist, e.g. --ext .md .py")
+    sub.add_argument("--poll", type=float, default=None,
+                     help="Use polling backend with this interval (for NFS/CIFS)")
+
+
+def _run_watch(args) -> None:
+    from treesearch.watch import watch
+    print(f"Watching {args.paths} → {args.db}  (Ctrl-C to stop)")
+    watch(
+        args.paths,
+        db_path=args.db,
+        debounce_s=args.debounce,
+        extensions=args.ext,
+        poll_seconds=args.poll,
+    )
 
 
 def _build_default_parser() -> argparse.ArgumentParser:
@@ -432,6 +501,28 @@ def main(argv: list[str] | None = None):
         level = logging.DEBUG if args.verbose else logging.WARNING
         logging.basicConfig(level=level, format="%(levelname)s - %(name)s - %(message)s")
         asyncio.run(_run_search(args))
+
+    elif subcmd in ("verify", "watch"):
+        sub_argv = []
+        found = False
+        for a in argv:
+            if not found and a == subcmd:
+                found = True
+                continue
+            sub_argv.append(a)
+        p = argparse.ArgumentParser(prog=f"treesearch {subcmd}")
+        p.add_argument("-v", "--verbose", action="store_true")
+        if subcmd == "verify":
+            _add_verify_args(p)
+        else:
+            _add_watch_args(p)
+        args = p.parse_args(sub_argv)
+        level = logging.INFO if args.verbose else logging.WARNING
+        logging.basicConfig(level=level, format="%(levelname)s - %(name)s - %(message)s")
+        if subcmd == "verify":
+            _run_verify(args)
+        else:
+            _run_watch(args)
 
     else:
         parser = _build_default_parser()

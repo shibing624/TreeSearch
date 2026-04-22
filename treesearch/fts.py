@@ -47,6 +47,14 @@ _DEFAULT_WEIGHTS = {
 _FTS5_AVAILABLE: Optional[bool] = None
 
 
+class _NullContext:
+    """No-op transaction context for callers managing commits externally."""
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        return False
+
+
 def _check_fts5() -> bool:
     """Check whether the current SQLite build includes the FTS5 extension."""
     global _FTS5_AVAILABLE
@@ -212,6 +220,8 @@ class FTS5Index:
         self._db_path = db_path or ":memory:"
         self._weights = {**_DEFAULT_WEIGHTS, **(weights or {})}
         self._conn: Optional[sqlite3.Connection] = None
+        # Populated by index_document(); inspected by build_index for stats.
+        self.last_node_diff: dict[str, int] = {"added": 0, "changed": 0, "removed": 0, "kept": 0}
         self._init_db()
 
     def _init_db(self) -> None:
@@ -324,22 +334,38 @@ class FTS5Index:
     # Indexing (Producer side)
     # -------------------------------------------------------------------
 
-    def index_document(self, document, force: bool = False, auto_commit: bool = True) -> int:
+    def index_document(self, document, force: bool = False, auto_commit: bool = True,
+                       file_hash: Optional[str] = None) -> int:
         """Index all nodes from a Document into FTS5.
 
+        Performs **node-level incremental diff**: only nodes whose content
+        actually changed (or appeared/disappeared) are removed/inserted into
+        the FTS5 index. The full document tree is still re-serialized into the
+        ``documents`` table so search continues to read the latest structure.
+
+        Stable ``node_id``s (assigned by :func:`treesearch.tree.assign_node_ids`)
+        are required for correct diffing — same logical position must yield the
+        same id across runs.
+
+        Side-effects on ``last_node_diff`` so callers (e.g. build_index) can
+        report diff stats.
+
         Args:
-            document: Document object with structure tree
-            force: re-index even if content hash matches
-            auto_commit: if False, skip commit (caller is responsible for committing)
+            document: Document object with structure tree.
+            force: re-index every node even if hashes match.
+            auto_commit: if False, skip commit (caller is responsible).
+            file_hash: optional file fingerprint to write to ``index_meta``
+                in the same transaction (avoids the "FTS written but
+                fingerprint missing → next run rebuilds" failure mode).
 
         Returns:
-            number of nodes indexed
+            number of nodes (re-)indexed in this call.
         """
         # Compute content hash for incremental check
         content_str = json.dumps(document.structure, ensure_ascii=False, sort_keys=True)
         content_hash = hashlib.md5(content_str.encode()).hexdigest()
 
-        # Check if already indexed
+        # Check if already indexed (whole-document fast-path)
         if not force:
             row = self._conn.execute(
                 "SELECT index_hash FROM documents WHERE doc_id = ?",
@@ -347,91 +373,161 @@ class FTS5Index:
             ).fetchone()
             if row and row[0] == content_hash:
                 logger.debug("Document %s already indexed (hash match), skipping", document.doc_id)
+                self.last_node_diff = {"added": 0, "changed": 0, "removed": 0, "kept": 0}
+                # Still write index_meta if requested — we may have been called
+                # because the file fingerprint changed but the structure didn't.
+                if file_hash and document.metadata.get("source_path"):
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO index_meta (source_path, file_hash) VALUES (?, ?)",
+                        (document.metadata["source_path"], file_hash),
+                    )
+                    if auto_commit:
+                        self._conn.commit()
                 return 0
 
-        # Clear old entries for this document
-        if self._use_fts5:
-            # FTS5 UNINDEXED columns can't be indexed, so use rowid-based delete
-            old_rowids = self._conn.execute(
-                "SELECT rowid FROM fts_nodes WHERE doc_id = ?", (document.doc_id,)
-            ).fetchall()
-            if old_rowids:
-                placeholders = ",".join("?" for _ in old_rowids)
-                self._conn.execute(
-                    f"DELETE FROM fts_nodes WHERE rowid IN ({placeholders})",
-                    [r[0] for r in old_rowids],
-                )
-        else:
-            self._conn.execute("DELETE FROM fts_nodes WHERE doc_id = ?", (document.doc_id,))
-        self._conn.execute("DELETE FROM nodes WHERE doc_id = ?", (document.doc_id,))
-
-        # Build parent map and depth map using shared utility
+        # ---- Compute node-level diff ----
         from .tree import flatten_tree, build_tree_maps
         _, parent_map, depth_map = build_tree_maps(document.structure)
 
-        all_nodes = flatten_tree(document.structure)
-        count = 0
+        all_nodes = [n for n in flatten_tree(document.structure) if n.get("node_id")]
 
+        new_hashes: dict[str, str] = {}
         for node in all_nodes:
-            nid = node.get("node_id", "")
-            if not nid:
-                continue
+            text = node.get("text", "")
+            new_hashes[node["node_id"]] = hashlib.md5(text.encode()).hexdigest()[:16]
 
+        if force:
+            old_hashes: dict[str, str] = {}
+        else:
+            old_hashes = {
+                nid: chash for (nid, chash) in self._conn.execute(
+                    "SELECT node_id, content_hash FROM nodes WHERE doc_id = ?",
+                    (document.doc_id,),
+                ).fetchall()
+            }
+
+        new_ids = set(new_hashes.keys())
+        old_ids = set(old_hashes.keys())
+        added = new_ids - old_ids
+        removed = old_ids - new_ids
+        changed = {nid for nid in (new_ids & old_ids) if new_hashes[nid] != old_hashes[nid]}
+        kept = (new_ids & old_ids) - changed
+
+        to_write = added | changed
+        diff_stats = {
+            "added": len(added),
+            "changed": len(changed),
+            "removed": len(removed),
+            "kept": len(kept),
+        }
+        self.last_node_diff = diff_stats
+
+        # ---- Stage all rows ahead of the transaction ----
+        node_rows: list[tuple] = []
+        fts_rows: list[tuple] = []
+        for node in all_nodes:
+            nid = node["node_id"]
+            if nid not in to_write:
+                continue
             title = node.get("title", "")
             summary = node.get("summary", node.get("prefix_summary", ""))
             text = node.get("text", "")
             depth = depth_map.get(nid, 0)
+            node_rows.append((
+                nid, document.doc_id, title, summary, depth,
+                node.get("line_start"), node.get("line_end"),
+                parent_map.get(nid), new_hashes[nid],
+            ))
 
-            # Insert into metadata table (always stores the original node)
+            parsed = parse_md_node_text(text)
+            fts_rows.append((
+                nid, document.doc_id,
+                _tokenize_for_fts(title),
+                _tokenize_for_fts(summary),
+                _tokenize_for_fts(parsed["body"]),
+                _tokenize_for_fts(parsed["code_blocks"]),
+                _tokenize_for_fts(parsed["front_matter"]),
+            ))
+
+        # ---- Single atomic transaction ----
+        # Wraps deletes + inserts + document metadata + index_meta so a crash
+        # in the middle either rolls back fully or commits everything.
+        structure_json = json.dumps(document.structure, ensure_ascii=False)
+
+        if auto_commit:
+            txn_ctx = self._conn  # 'with conn' = implicit transaction
+        else:
+            txn_ctx = _NullContext()
+
+        with txn_ctx:
+            # Targeted deletes for removed + changed (NOT a wholesale wipe).
+            del_ids = removed | changed | (added if force else set())
+            if del_ids:
+                if self._use_fts5:
+                    placeholders = ",".join("?" for _ in del_ids)
+                    old_rowids = self._conn.execute(
+                        f"SELECT rowid FROM fts_nodes WHERE doc_id = ? AND node_id IN ({placeholders})",
+                        (document.doc_id, *del_ids),
+                    ).fetchall()
+                    if old_rowids:
+                        ph2 = ",".join("?" for _ in old_rowids)
+                        self._conn.execute(
+                            f"DELETE FROM fts_nodes WHERE rowid IN ({ph2})",
+                            [r[0] for r in old_rowids],
+                        )
+                else:
+                    placeholders = ",".join("?" for _ in del_ids)
+                    self._conn.execute(
+                        f"DELETE FROM fts_nodes WHERE doc_id = ? AND node_id IN ({placeholders})",
+                        (document.doc_id, *del_ids),
+                    )
+                placeholders = ",".join("?" for _ in del_ids)
+                self._conn.execute(
+                    f"DELETE FROM nodes WHERE doc_id = ? AND node_id IN ({placeholders})",
+                    (document.doc_id, *del_ids),
+                )
+
+            if node_rows:
+                self._conn.executemany(
+                    """INSERT INTO nodes
+                       (node_id, doc_id, title, summary, depth, line_start, line_end, parent_node_id, content_hash)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    node_rows,
+                )
+            if fts_rows:
+                self._conn.executemany(
+                    """INSERT INTO fts_nodes
+                       (node_id, doc_id, title, summary, body, code_blocks, front_matter)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    fts_rows,
+                )
+
             self._conn.execute(
-                """INSERT OR REPLACE INTO nodes
-                   (node_id, doc_id, title, summary, depth, line_start, line_end, parent_node_id, content_hash)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT OR REPLACE INTO documents
+                   (doc_id, doc_name, doc_description, source_path, source_type,
+                    structure_json, node_count, index_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    nid, document.doc_id, title, summary, depth,
-                    node.get("line_start"), node.get("line_end"),
-                    parent_map.get(nid), hashlib.md5(text.encode()).hexdigest()[:16],
+                    document.doc_id, document.doc_name, document.doc_description,
+                    document.metadata.get("source_path", ""),
+                    document.source_type,
+                    structure_json,
+                    len(all_nodes), content_hash,
                 ),
             )
 
-            # Parse MD structure for FTS5 columns
-            parsed = parse_md_node_text(text)
+            if file_hash and document.metadata.get("source_path"):
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO index_meta (source_path, file_hash) VALUES (?, ?)",
+                    (document.metadata["source_path"], file_hash),
+                )
 
-            # Pre-tokenize for CJK support
-            title_tok = _tokenize_for_fts(title)
-            summary_tok = _tokenize_for_fts(summary)
-            body_tok = _tokenize_for_fts(parsed["body"])
-            code_tok = _tokenize_for_fts(parsed["code_blocks"])
-            fm_tok = _tokenize_for_fts(parsed["front_matter"])
-
-            # Insert into FTS5 index
-            self._conn.execute(
-                """INSERT INTO fts_nodes
-                   (node_id, doc_id, title, summary, body, code_blocks, front_matter)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (nid, document.doc_id, title_tok, summary_tok, body_tok, code_tok, fm_tok),
-            )
-            count += 1
-
-        # Update document metadata (including tree structure)
-        structure_json = json.dumps(document.structure, ensure_ascii=False)
-        self._conn.execute(
-            """INSERT OR REPLACE INTO documents
-               (doc_id, doc_name, doc_description, source_path, source_type, structure_json, node_count, index_hash)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                document.doc_id, document.doc_name, document.doc_description,
-                document.metadata.get("source_path", ""),
-                document.source_type,
-                structure_json,
-                count, content_hash,
-            ),
+        logger.debug(
+            "FTS5 reindexed %s: +%d ~%d -%d (kept %d)",
+            document.doc_id, diff_stats["added"], diff_stats["changed"],
+            diff_stats["removed"], diff_stats["kept"],
         )
-
-        if auto_commit:
-            self._conn.commit()
-        logger.debug("FTS5 indexed document %s: %d nodes", document.doc_id, count)
-        return count
+        return len(node_rows)
 
     def commit(self) -> None:
         """Manually commit pending changes to the database."""
@@ -1094,6 +1190,163 @@ class FTS5Index:
         """
         self.delete_document(doc_id)
 
+    def find_doc_by_fingerprint(self, file_hash: str, exclude_paths: Optional[set] = None) -> Optional[str]:
+        """Find a doc whose ``index_meta.file_hash`` matches ``file_hash``.
+
+        Used by the indexer to detect file moves/renames: if the same fingerprint
+        already exists under a different source_path, we can update the path
+        instead of re-parsing+re-indexing the file.
+
+        Args:
+            file_hash: target fingerprint string.
+            exclude_paths: source_paths to skip (e.g. paths still on disk).
+
+        Returns:
+            doc_id of the matching document, or None if no candidate.
+        """
+        rows = self._conn.execute(
+            "SELECT source_path FROM index_meta WHERE file_hash = ?",
+            (file_hash,),
+        ).fetchall()
+        for (sp,) in rows:
+            if exclude_paths and sp in exclude_paths:
+                continue
+            doc_id = self.get_doc_id_by_source_path(sp)
+            if doc_id is not None:
+                return doc_id
+        return None
+
+    def update_source_path(self, doc_id: str, new_source_path: str) -> None:
+        """Atomically remap a document's source_path (move/rename support)."""
+        with self._conn:
+            old_row = self._conn.execute(
+                "SELECT source_path FROM documents WHERE doc_id = ?", (doc_id,)
+            ).fetchone()
+            self._conn.execute(
+                "UPDATE documents SET source_path = ? WHERE doc_id = ?",
+                (new_source_path, doc_id),
+            )
+            if old_row and old_row[0]:
+                self._conn.execute(
+                    "DELETE FROM index_meta WHERE source_path = ?", (old_row[0],)
+                )
+
+    def rename_document(
+        self,
+        old_doc_id: str,
+        new_doc_id: str,
+        new_doc_name: str,
+        new_source_path: str,
+    ) -> bool:
+        """Rename a doc in place across nodes / fts_nodes / documents / index_meta.
+
+        Used by `build_index`'s move-detection pre-pass when a file with an
+        unchanged content fingerprint shows up under a new path. Keeps the
+        doc identity (`doc_id` and `doc_name`) consistent with the new file
+        basename so callers don't see stale names after a rename.
+
+        Returns ``False`` (and writes nothing) when:
+          - the original ``old_doc_id`` no longer exists, or
+          - ``new_doc_id`` is already taken by a *different* document — in
+            that case the caller should fall back to a full re-index.
+        """
+        old_row = self._conn.execute(
+            "SELECT doc_id, source_path FROM documents WHERE doc_id = ?",
+            (old_doc_id,),
+        ).fetchone()
+        if old_row is None:
+            return False
+        old_source_path = old_row[1] or ""
+
+        if new_doc_id != old_doc_id:
+            clash = self._conn.execute(
+                "SELECT 1 FROM documents WHERE doc_id = ?", (new_doc_id,)
+            ).fetchone()
+            if clash is not None:
+                return False
+
+        with self._conn:
+            if new_doc_id != old_doc_id:
+                self._conn.execute(
+                    "UPDATE nodes SET doc_id = ? WHERE doc_id = ?",
+                    (new_doc_id, old_doc_id),
+                )
+                self._conn.execute(
+                    "UPDATE fts_nodes SET doc_id = ? WHERE doc_id = ?",
+                    (new_doc_id, old_doc_id),
+                )
+                self._conn.execute(
+                    "UPDATE documents SET doc_id = ?, doc_name = ?, source_path = ? "
+                    "WHERE doc_id = ?",
+                    (new_doc_id, new_doc_name, new_source_path, old_doc_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE documents SET doc_name = ?, source_path = ? WHERE doc_id = ?",
+                    (new_doc_name, new_source_path, old_doc_id),
+                )
+            if old_source_path and old_source_path != new_source_path:
+                self._conn.execute(
+                    "DELETE FROM index_meta WHERE source_path = ?", (old_source_path,)
+                )
+
+        return True
+
+    def delete_documents(self, doc_ids: list[str]) -> int:
+        """Batch-delete multiple documents in a single transaction.
+
+        Significantly faster than calling ``delete_document`` in a loop because
+        every table is hit once with an ``IN (...)`` clause.
+
+        Returns the number of documents that actually existed and were removed.
+        """
+        if not doc_ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in doc_ids)
+        existing_rows = self._conn.execute(
+            f"SELECT doc_id, source_path FROM documents WHERE doc_id IN ({placeholders})",
+            doc_ids,
+        ).fetchall()
+        if not existing_rows:
+            return 0
+
+        existing_ids = [r[0] for r in existing_rows]
+        existing_paths = [r[1] for r in existing_rows if r[1]]
+        ph_e = ",".join("?" for _ in existing_ids)
+
+        with self._conn:
+            if self._use_fts5:
+                old_rowids = self._conn.execute(
+                    f"SELECT rowid FROM fts_nodes WHERE doc_id IN ({ph_e})",
+                    existing_ids,
+                ).fetchall()
+                if old_rowids:
+                    ph2 = ",".join("?" for _ in old_rowids)
+                    self._conn.execute(
+                        f"DELETE FROM fts_nodes WHERE rowid IN ({ph2})",
+                        [r[0] for r in old_rowids],
+                    )
+            else:
+                self._conn.execute(
+                    f"DELETE FROM fts_nodes WHERE doc_id IN ({ph_e})", existing_ids
+                )
+            self._conn.execute(
+                f"DELETE FROM nodes WHERE doc_id IN ({ph_e})", existing_ids
+            )
+            self._conn.execute(
+                f"DELETE FROM documents WHERE doc_id IN ({ph_e})", existing_ids
+            )
+            if existing_paths:
+                ph_p = ",".join("?" for _ in existing_paths)
+                self._conn.execute(
+                    f"DELETE FROM index_meta WHERE source_path IN ({ph_p})",
+                    existing_paths,
+                )
+
+        logger.info("Batch-deleted %d document(s)", len(existing_ids))
+        return len(existing_ids)
+
     def get_doc_id_by_source_path(self, source_path: str) -> Optional[str]:
         """Look up a doc_id from a source file path.
 
@@ -1280,6 +1533,122 @@ class FTS5Index:
             "SELECT 1 FROM documents WHERE doc_id = ?", (doc_id,)
         ).fetchone()
         return row is not None
+
+    def wal_checkpoint(self, mode: str = "TRUNCATE") -> None:
+        """Force a WAL checkpoint to fold the ``-wal`` sidecar back into the DB.
+
+        Useful at the end of a long incremental indexing run so the ``-wal``
+        file does not stay multi-GB after many small commits. ``TRUNCATE``
+        is the strongest variant (always safe — only no-ops when readers hold
+        the WAL open).
+        """
+        try:
+            self._conn.execute(f"PRAGMA wal_checkpoint({mode})")
+        except sqlite3.OperationalError as e:
+            logger.debug("WAL checkpoint(%s) failed: %s", mode, e)
+
+    def verify_index(self) -> dict:
+        """Cross-table consistency check.
+
+        Detects orphan rows that violate the four-table invariant:
+          - ``nodes`` rows whose doc_id has no entry in ``documents``.
+          - ``fts_nodes`` rows whose doc_id has no entry in ``documents``.
+          - ``index_meta`` rows whose source_path has no entry in ``documents``.
+          - ``documents`` rows with non-existent on-disk source_path.
+
+        Returns a report dict with ``healthy: bool`` and lists of problem ids.
+        Use :meth:`repair_index` to clean orphans.
+        """
+        report: dict = {
+            "healthy": True,
+            "orphan_node_doc_ids": [],
+            "orphan_fts_doc_ids": [],
+            "orphan_meta_paths": [],
+            "missing_source_paths": [],
+        }
+        cur = self._conn.execute(
+            "SELECT DISTINCT n.doc_id FROM nodes n "
+            "LEFT JOIN documents d ON n.doc_id = d.doc_id WHERE d.doc_id IS NULL"
+        ).fetchall()
+        report["orphan_node_doc_ids"] = [r[0] for r in cur]
+        cur = self._conn.execute(
+            "SELECT DISTINCT f.doc_id FROM fts_nodes f "
+            "LEFT JOIN documents d ON f.doc_id = d.doc_id WHERE d.doc_id IS NULL"
+        ).fetchall()
+        report["orphan_fts_doc_ids"] = [r[0] for r in cur]
+        cur = self._conn.execute(
+            "SELECT m.source_path FROM index_meta m "
+            "LEFT JOIN documents d ON m.source_path = d.source_path WHERE d.doc_id IS NULL"
+        ).fetchall()
+        report["orphan_meta_paths"] = [r[0] for r in cur]
+        cur = self._conn.execute(
+            "SELECT doc_id, source_path FROM documents WHERE source_path != ''"
+        ).fetchall()
+        report["missing_source_paths"] = [
+            (doc_id, sp) for (doc_id, sp) in cur if not os.path.isfile(sp)
+        ]
+        report["healthy"] = not any(
+            report[k] for k in
+            ("orphan_node_doc_ids", "orphan_fts_doc_ids",
+             "orphan_meta_paths", "missing_source_paths")
+        )
+        return report
+
+    def repair_index(self, drop_missing_files: bool = False) -> dict:
+        """Remove orphan rows surfaced by :meth:`verify_index`.
+
+        Args:
+            drop_missing_files: also delete documents whose source file no
+                longer exists on disk (default False — those may be intentional
+                in-memory loads or inaccessible mounts).
+
+        Returns:
+            Dict with counts of removed orphan rows.
+        """
+        report = self.verify_index()
+        removed = {"orphan_nodes": 0, "orphan_fts": 0, "orphan_meta": 0, "missing_files": 0}
+
+        with self._conn:
+            if report["orphan_node_doc_ids"]:
+                ph = ",".join("?" for _ in report["orphan_node_doc_ids"])
+                cur = self._conn.execute(
+                    f"DELETE FROM nodes WHERE doc_id IN ({ph})",
+                    report["orphan_node_doc_ids"],
+                )
+                removed["orphan_nodes"] = cur.rowcount
+            if report["orphan_fts_doc_ids"]:
+                ph = ",".join("?" for _ in report["orphan_fts_doc_ids"])
+                if self._use_fts5:
+                    rowids = self._conn.execute(
+                        f"SELECT rowid FROM fts_nodes WHERE doc_id IN ({ph})",
+                        report["orphan_fts_doc_ids"],
+                    ).fetchall()
+                    if rowids:
+                        ph2 = ",".join("?" for _ in rowids)
+                        cur = self._conn.execute(
+                            f"DELETE FROM fts_nodes WHERE rowid IN ({ph2})",
+                            [r[0] for r in rowids],
+                        )
+                        removed["orphan_fts"] = cur.rowcount
+                else:
+                    cur = self._conn.execute(
+                        f"DELETE FROM fts_nodes WHERE doc_id IN ({ph})",
+                        report["orphan_fts_doc_ids"],
+                    )
+                    removed["orphan_fts"] = cur.rowcount
+            if report["orphan_meta_paths"]:
+                ph = ",".join("?" for _ in report["orphan_meta_paths"])
+                cur = self._conn.execute(
+                    f"DELETE FROM index_meta WHERE source_path IN ({ph})",
+                    report["orphan_meta_paths"],
+                )
+                removed["orphan_meta"] = cur.rowcount
+
+        if drop_missing_files and report["missing_source_paths"]:
+            doc_ids = [doc_id for (doc_id, _) in report["missing_source_paths"]]
+            removed["missing_files"] = self.delete_documents(doc_ids)
+
+        return removed
 
     def get_unindexed_doc_ids(self, doc_ids: list[str]) -> set[str]:
         """Return the subset of doc_ids that are NOT yet indexed.

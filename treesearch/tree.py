@@ -4,8 +4,11 @@
 @description: Tree structure data models and operations.
 """
 import copy
+import hashlib
 import json
 import logging
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -187,23 +190,69 @@ def find_node(structure, node_id: str) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Node ID assignment
+# Node ID assignment — stable, position-aware hashing
 # ---------------------------------------------------------------------------
 
-def assign_node_ids(data, node_id: int = 0) -> int:
-    """Recursively assign node_id to each node. Returns next available id.
+_RE_NORMALIZE_WS = re.compile(r"\s+")
 
-    Uses variable-length encoding: no fixed zero-padding, supports any tree size.
+
+def _normalize_title(title: str) -> str:
+    """Normalize a title for stable node_id derivation.
+
+    Applies Unicode NFKC, casefolds, and collapses whitespace so that
+    cosmetic edits (extra spaces, full-width vs half-width punctuation,
+    case changes) do not destabilize node_ids.
     """
-    if isinstance(data, dict):
-        data["node_id"] = str(node_id)
-        node_id += 1
-        if "nodes" in data:
-            node_id = assign_node_ids(data["nodes"], node_id)
-    elif isinstance(data, list):
-        for item in data:
-            node_id = assign_node_ids(item, node_id)
-    return node_id
+    if not title:
+        return ""
+    t = unicodedata.normalize("NFKC", title).casefold()
+    t = _RE_NORMALIZE_WS.sub(" ", t).strip()
+    return t
+
+
+def _hash_node_path(path: str) -> str:
+    """Hash a sibling-disambiguated path into a 16-char hex node_id."""
+    return hashlib.blake2b(path.encode("utf-8"), digest_size=8).hexdigest()
+
+
+def assign_node_ids(data, parent_path: str = "") -> None:
+    """Recursively assign STABLE node_ids derived from tree position.
+
+    For each sibling group at any depth, ``node_id`` is computed as::
+
+        node_id = blake2b(parent_path + "/" + normalized_title + "#" + ordinal)
+
+    where ``ordinal`` disambiguates siblings sharing the same normalized
+    title. Re-running on a structurally identical tree produces identical
+    node_ids — the foundation of node-level diff in incremental indexing.
+
+    Key properties:
+      - **Position-aware**: same title at different parents → different IDs.
+      - **Edit-tolerant**: editing a node's text does not change its ID.
+      - **Insert-tolerant**: inserting a sibling only shifts later same-name
+        siblings' ordinals (rather than every following node).
+
+    Args:
+        data: tree node, list of nodes, or root structure (list).
+        parent_path: internal — path signature of the parent.
+    """
+    if isinstance(data, list):
+        sibling_ordinals: dict[str, int] = {}
+        for node in data:
+            if not isinstance(node, dict):
+                continue
+            title = node.get("title", "")
+            normalized = _normalize_title(title) or "_"
+            ordinal = sibling_ordinals.get(normalized, 0)
+            sibling_ordinals[normalized] = ordinal + 1
+            sig = f"{parent_path}/{normalized}#{ordinal}"
+            node["node_id"] = _hash_node_path(sig)
+            children = node.get("nodes")
+            if children:
+                assign_node_ids(children, parent_path=sig)
+    elif isinstance(data, dict):
+        # Treat lone-dict input as a single-element list at the same depth.
+        assign_node_ids([data], parent_path=parent_path)
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +318,6 @@ def save_index(index: dict, db_path: str, doc_id: str = "") -> None:
         source_type=index.get("source_type", ""),
     )
     fts = FTS5Index(db_path=db_path)
-    fts.save_document(doc)
     fts.index_document(doc)
     fts.close()
     logger.info("Index saved to DB: %s (doc_id=%s)", db_path, doc_id)

@@ -74,7 +74,7 @@ class TestGetLeafNodes:
 
 
 class TestAssignNodeIds:
-    def test_assigns_ids(self):
+    def test_assigns_ids_unique_and_stable(self):
         tree = [
             {"title": "A", "nodes": [{"title": "B"}, {"title": "C"}]},
             {"title": "D"},
@@ -82,7 +82,54 @@ class TestAssignNodeIds:
         assign_node_ids(tree)
         flat = flatten_tree(tree)
         ids = [n["node_id"] for n in flat]
-        assert ids == ["0", "1", "2", "3"]
+        # All four nodes have an id
+        assert len(ids) == 4
+        # IDs are stable 16-char hex strings (blake2b digest)
+        assert all(len(i) == 16 and all(c in "0123456789abcdef" for c in i) for i in ids)
+        # Unique within the tree
+        assert len(set(ids)) == 4
+
+    def test_ids_are_deterministic(self):
+        """Same structure → identical node_ids across runs (foundation of diff)."""
+        tree1 = [
+            {"title": "Alpha", "nodes": [{"title": "Beta"}, {"title": "Gamma"}]},
+        ]
+        tree2 = [
+            {"title": "Alpha", "nodes": [{"title": "Beta"}, {"title": "Gamma"}]},
+        ]
+        assign_node_ids(tree1)
+        assign_node_ids(tree2)
+        ids1 = [n["node_id"] for n in flatten_tree(tree1)]
+        ids2 = [n["node_id"] for n in flatten_tree(tree2)]
+        assert ids1 == ids2
+
+    def test_text_edit_does_not_change_id(self):
+        """Editing text/summary/etc. must not perturb node_id."""
+        tree_a = [{"title": "Section", "text": "v1", "nodes": [{"title": "Sub", "text": "old"}]}]
+        tree_b = [{"title": "Section", "text": "v2", "nodes": [{"title": "Sub", "text": "new"}]}]
+        assign_node_ids(tree_a)
+        assign_node_ids(tree_b)
+        ids_a = [n["node_id"] for n in flatten_tree(tree_a)]
+        ids_b = [n["node_id"] for n in flatten_tree(tree_b)]
+        assert ids_a == ids_b
+
+    def test_duplicate_sibling_titles_disambiguated_by_ordinal(self):
+        tree = [
+            {"title": "Item", "nodes": []},
+            {"title": "Item", "nodes": []},
+            {"title": "Item", "nodes": []},
+        ]
+        assign_node_ids(tree)
+        ids = [n["node_id"] for n in flatten_tree(tree)]
+        assert len(set(ids)) == 3  # all distinct via ordinal
+
+    def test_normalization_collapses_whitespace_and_case(self):
+        """Cosmetic title edits (extra space, casing) should not change id."""
+        tree_a = [{"title": "Hello World"}]
+        tree_b = [{"title": "  hello   WORLD  "}]
+        assign_node_ids(tree_a)
+        assign_node_ids(tree_b)
+        assert tree_a[0]["node_id"] == tree_b[0]["node_id"]
 
 
 class TestRemoveFields:
