@@ -250,3 +250,10 @@ PERFORMANCE_SUMMARY.txt
 tmp/
 output/
 .DS_Store
+
+# Large external benchmark checkouts and generated caches
+evaluation/data/GraphRAG-Benchmark/
+evaluation/data/repoqa/
+evaluation/data/repoqa-*.json
+evaluation/data/codesearchnet_cache/
+evaluation/data/

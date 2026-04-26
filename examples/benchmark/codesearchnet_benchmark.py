@@ -110,6 +110,7 @@ def load_codesearchnet_from_hf(
     split: str = "test",
     max_samples: int = 100,
     max_corpus: int = 1000,
+    cache_dir: str | None = None,
 ) -> tuple[list[CodeSample], CodeCorpus]:
     """Load CodeSearchNet from HuggingFace.
 
@@ -126,7 +127,7 @@ def load_codesearchnet_from_hf(
     """
     import pickle
 
-    cache_dir = os.path.join(os.path.dirname(__file__), ".cache")
+    cache_dir = cache_dir or os.path.join(os.path.dirname(__file__), ".cache")
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, f"codesearchnet_{language}_{split}_{max_samples}_{max_corpus}.pkl")
 
@@ -475,11 +476,43 @@ class CodeTripletExtractor:
     """Lightweight code relation extractor for CodeSearchNet GraphRAG smoke runs."""
 
     def extract(self, passage: GraphNodePassage) -> list[GraphRelation]:
-        subject = passage.title or passage.doc_name
+        code_text = " ".join([passage.title, passage.text])
+        function_names = _defined_functions(passage.text)
+        subject = function_names[0] if function_names else (passage.title or passage.doc_name)
         if not subject:
             return []
-        identifiers = _code_identifiers(" ".join([passage.title, passage.text]))
         relations = []
+        for function_name in function_names:
+            text = f"{subject} defines function {function_name}"
+            relations.append(
+                GraphRelation(
+                    relation_id=_code_relation_id(passage.graph_node_id, text),
+                    subject=subject,
+                    predicate="defines",
+                    object=function_name,
+                    text=text,
+                    node_id=passage.node_id,
+                    doc_id=passage.doc_id,
+                    source_type=passage.source_type,
+                )
+            )
+
+        for call_name in _called_functions(passage.text, excluded=set(function_names)):
+            text = f"{subject} calls {call_name}"
+            relations.append(
+                GraphRelation(
+                    relation_id=_code_relation_id(passage.graph_node_id, text),
+                    subject=subject,
+                    predicate="calls",
+                    object=call_name,
+                    text=text,
+                    node_id=passage.node_id,
+                    doc_id=passage.doc_id,
+                    source_type=passage.source_type,
+                )
+            )
+
+        identifiers = _code_identifiers(code_text)
         for identifier in identifiers:
             text = f"{subject} mentions {identifier}"
             relations.append(
@@ -548,6 +581,22 @@ def _code_identifiers(text: str, max_identifiers: int = 40) -> list[str]:
             continue
         identifiers.append(token)
     return list(dict.fromkeys(identifiers))[:max_identifiers]
+
+
+def _defined_functions(text: str) -> list[str]:
+    names = re.findall(r"\b(?:def|function)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", text)
+    return list(dict.fromkeys(names))
+
+
+def _called_functions(text: str, excluded: set[str]) -> list[str]:
+    names = []
+    for name in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", text):
+        if name in excluded:
+            continue
+        if name in {"if", "for", "while", "return", "with", "def", "function"}:
+            continue
+        names.append(name)
+    return list(dict.fromkeys(names))
 
 
 def _code_relation_id(graph_node_id: str, text: str) -> str:
@@ -680,6 +729,7 @@ async def main():
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     parser.add_argument("--output-dir", type=str, default=os.path.join(_script_dir, "benchmark_results", "codesearchnet"), help="Output directory")
     parser.add_argument("--index-dir", type=str, default=os.path.join(_script_dir, "indexes", "codesearchnet"), help="Index directory")
+    parser.add_argument("--cache-dir", type=str, default=os.path.join(_script_dir, ".cache"), help="Dataset cache directory")
     parser.add_argument("--with-embedding", action="store_true", help="Also evaluate embedding-based retrieval")
     parser.add_argument("--with-graphrag", action="store_true", help="Also evaluate TreeSearch-node GraphRAG retrieval")
     args = parser.parse_args()
@@ -690,6 +740,7 @@ async def main():
         split=args.split,
         max_samples=args.max_samples,
         max_corpus=args.max_corpus,
+        cache_dir=args.cache_dir,
     )
 
     print(f"\n{'=' * 70}")

@@ -683,11 +683,14 @@ GraphRAG 消融 pilot：
 
 | Item | Status | Result / Blocker |
 |---|---|---|
-| 9-method public reference | 已确认可作为 external comparison | 公开表中 RAPTOR 平均 accuracy 73.58，HippoRAG 72.64，Microsoft GraphRAG 72.50；这些只能作为外部参考，不是本 repo 跑出的结果 |
-| TreeSearch-node GraphRAG on GraphRAG-Bench | 未跑出正式结果 | 本 repo 尚无 GraphRAG-Bench dataset loader / adapter，不能把公开 leaderboard 写成 ours |
-| Required next output | 待实现 | `evaluation/graphrag_bench.py`，输出 official-compatible prediction rows，并调用 benchmark 原生 evaluator 得到 Accuracy / R / AR |
+| External baselines | 已落到 `evaluation/external_baselines.py` | 只作为公开对照，不本地复现。当前记录 Fast-GraphRAG Novel Fact Retrieval Acc 60.08、LightRAG Medical Contextual Summarization Acc 69.37、LightRAG Medical Creative Factual 70.84、HippoRAG2 Medical Fact Retrieval ROUGE-L 33.92 |
+| TreeSearch-node GraphRAG adapter | 已实现 | `evaluation/graphrag_bench.py` 支持新版 GraphRAG-Benchmark `medical` dict corpus 与 `novel` list corpus，输出 official-compatible prediction rows |
+| Medical smoke | 已跑 | 5 questions：offline proxy Accuracy 0.400、R 1.000、AR 0.500，输出 `evaluation/output/graphrag_bench/medical_treesearch_graphrag_5.summary.json` |
+| Novel smoke | 已跑 | 5 questions：offline proxy Accuracy 0.800、R 0.800、AR 0.600，输出 `evaluation/output/graphrag_bench/novel_treesearch_graphrag_5.summary.json` |
+| Official evaluator | 已切到 Zhipu embedding 并跑通 1-sample smoke | `--official-eval` 现在进程内调用官方 `Evaluation.retrieval_eval` / `Evaluation.generation_eval`，embedding 使用本地 Zhipu `embedding-3` wrapper，避免 HuggingFace BGE 下载。Medical 1-sample official retrieval：Context Relevancy 1.000、Evidence Recall 1.000；official generation：ROUGE-L 0.774、Answer Correctness 0.746 |
+| Dependency install | 已确认可 import，但原始安装进程曾卡住 | 之前 `pip install -i https://pypi.org/simple --no-build-isolation rouge_score ragas ...` 在 `ragas` / `datasets` / `pyarrow` 依赖解析下载阶段长时间无明确结束信号，终端记录 `exit_code: unknown`，进程已不存在；当前 `ragas`、`rouge_score`、`tempdir`、`json_repair`、`langchain_ollama` 均可 import |
 
-论文写法：GraphRAG-Bench 当前只能写为 planned benchmark + external baseline reference；正式 claim 必须等本方法在同一 evaluator 上跑出结果后再写。
+论文写法：GraphRAG-Bench 当前可以写为“adapter + prediction rows + offline proxy smoke 已完成”，但正式 claim 仍必须等官方 evaluator 完整跑通后再写。
 
 第三层：代码仓库（证明代码定位能力）
 
@@ -703,36 +706,45 @@ GraphRAG 消融 pilot：
 
 当前代码状态：
 
-1. 已在 `examples/benchmark/codesearchnet_benchmark.py` 增加 `TreeSearchCodeGraphRAGIndex`。
-2. 已新增 CLI 参数 `--with-graphrag`，可在现有 CodeSearchNet benchmark 中增加 `treesearch_graphrag` 方法。
-3. 已新增 `tmp/codesearchnet_graphrag_smoke_demo.py`，用真实 TreeSearch indexing + TreeSearch-node GraphRAG 跑 synthetic CodeSearchNet path。
+1. 已在 `evaluation/repoqa_snf.py` 接入 RepoQA SNF 本地数据 `evaluation/data/repoqa-2024-06-23.json`，并输出 `repoqa.compute_score` 兼容 JSONL。
+2. 已调用 RepoQA 官方 `compute_score`，20-task smoke 在 threshold 0.8 下 pass@1 = 0.150。
+3. 已在 `evaluation/codesearchnet_eval.py` 增加 evaluation-scoped runner，cache/index/result 都落在 `evaluation/` 下。
 4. 已补充 GraphRAG async query path，解决 CodeSearchNet async benchmark 中同步 GraphRAG seed retrieval 的 nested event loop 问题。
-5. 下一步是接入 RepoQA SNF 数据格式：将 needle function 描述作为 query，将 repository functions/classes 转成 TreeSearch code nodes，输出 function-level hit rate 与 BLEU/similarity-compatible result。
+5. 已优化 `CodeTripletExtractor`，增加 `defines` / `calls` 关系，避免只有 identifier mentions。
 
 CodeSearchNet 运行命令：
 
 ```bash
-python examples/benchmark/codesearchnet_benchmark.py \
+python -m evaluation.codesearchnet_eval \
   --language python \
-  --max-samples 20 \
-  --max-corpus 200 \
-  --with-graphrag \
+  --max-samples 50 \
+  --max-corpus 1000 \
   --with-embedding
 ```
 
-CodeSearchNet 小样本结果（Python test，20 queries / 200 corpus，Zhipu `embedding-3`，2026-04-26）：
+CodeSearchNet 结果（Python test，50 queries / 1000 corpus，Zhipu `embedding-3`，2026-04-26）：
 
 | Method | MRR | Hit@1 | Recall@5 | Recall@10 | Avg query time (s) | Index time (s) |
 |---|---:|---:|---:|---:|---:|---:|
-| TreeSearch FTS5 | 0.885 | 0.850 | 0.950 | 0.950 | 0.0005 | 0.684 |
-| TreeSearch tree | 0.867 | 0.800 | 0.950 | 0.950 | 0.0027 | 0.684 |
-| TreeSearch auto | 0.885 | 0.850 | 0.950 | 0.950 | 0.0005 | 0.684 |
-| TreeSearch-node GraphRAG | 0.800 | 0.750 | 0.850 | 0.850 | 0.2717 | 0.684 |
-| Zhipu Dense | 0.900 | 0.800 | 1.000 | 1.000 | 0.1509 | 5.683 |
+| TreeSearch FTS5 | 0.857 | 0.820 | 0.900 | 0.900 | 0.0022 | 1.632 |
+| TreeSearch tree | 0.537 | 0.520 | 0.560 | 0.560 | 0.0327 | 1.632 |
+| TreeSearch auto | 0.857 | 0.820 | 0.900 | 0.900 | 0.0023 | 1.632 |
+| TreeSearch-node GraphRAG | 0.840 | 0.820 | 0.860 | 0.860 | 8.3853 | 1.632 |
+| Zhipu Dense | 0.848 | 0.780 | 0.940 | 0.940 | 0.1565 | 30.242 |
 
-同时跑通 synthetic smoke：`tmp/codesearchnet_graphrag_smoke_demo.py` 得到 MRR 1.000、Hit@1 1.000、Recall@2 1.000。解释：CodeSearchNet 小样本中 Dense 的 Recall@5/10 更强，TreeSearch FTS5/auto 的 Hit@1 更强且快约 300x；当前 lightweight code relation extractor 让 GraphRAG 低于 TreeSearch-only，因此这组结果更适合作为 runnable validation 和 error analysis，而不是最终主结果。
+CodeSearchNet 多语言补充（JavaScript test，50 queries / 1000 corpus，含 GraphRAG/Dense，2026-04-26）：
 
-RepoQA 当前结果状态：未跑出 500-test SNF 正式结果；缺 official data adapter、function candidate extraction、`repoqa.compute_score` 对接，以及 BLEU>0.8 的官方兼容评分输出。
+| Method | MRR | Hit@1 | Recall@5 | Recall@10 | Avg query time (s) | Index time (s) |
+|---|---:|---:|---:|---:|---:|---:|
+| TreeSearch FTS5 | 0.443 | 0.360 | 0.560 | 0.680 | 0.0018 | 1.417 |
+| TreeSearch tree | 0.444 | 0.400 | 0.480 | 0.560 | 0.0184 | 1.417 |
+| TreeSearch auto | 0.443 | 0.360 | 0.560 | 0.680 | 0.0019 | 1.417 |
+| TreeSearch-node GraphRAG | 0.287 | 0.220 | 0.400 | 0.400 | 5.6751 | 1.417 |
+| Zhipu Dense | 0.752 | 0.620 | 0.900 | 0.920 | 0.1486 | 29.209 |
+
+解释：Python 50/1000 上 GraphRAG 的 Hit@1 与 TreeSearch FTS5 持平，但 Recall@5/10 略低且延迟高，说明当前 code graph expansion 有效但不够高效；Dense 在 Recall@5/10 上更强，TreeSearch 在 Hit@1 与速度上更有优势。JavaScript 上 Zhipu Dense 明显更强（MRR 0.752、Recall@10 0.920），而当前 TreeSearch-node GraphRAG 明显弱于 TreeSearch-only（MRR 0.287 vs 0.443），说明 JS 的代码图抽取/扩展规则还不适合直接作为检索 reranker，后续需要语言特定 parser/extractor 或改成 Dense/TreeSearch seed + graph evidence attribution。
+
+RepoQA 当前结果状态：已下载 2024-06-23 官方 500-test 数据到 `evaluation/data`；20-task Python smoke 的 function retrieval Hit@1 = 0.150，官方 `repoqa.compute_score` threshold 0.8 pass@1 = 0.150。当前只是 adapter validation，离正式 RepoQA claim 还差全 500 tests 与更强候选函数排序。
 
 消融实验矩阵：
 
