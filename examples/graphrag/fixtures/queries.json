@@ -1,29 +1,34 @@
 [
-  {
-    "query_id": "cross_code_doc",
-    "query": "max_concurrency TreeSearchConfig Runtime Settings",
-    "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"],
-    "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"],
-    "query_type": "code_doc",
-    "requires_cross_source": true,
-    "needs_line_grounding": true
-  },
-  {
-    "query_id": "single_config",
-    "query": "cjk_tokenizer TreeSearchConfig",
-    "gold_node_ids": ["config::2c0bc2b09fcec479"],
-    "gold_source_paths": ["treesearch/config.py"],
-    "query_type": "single_source_config",
-    "requires_cross_source": false,
-    "needs_line_grounding": true
-  },
-  {
-    "query_id": "cli_doc",
-    "query": "treesearch CLI Usage index command",
-    "gold_node_ids": ["cli::aba57ea08154375b"],
-    "gold_source_paths": ["docs/cli.md"],
-    "query_type": "single_source_doc",
-    "requires_cross_source": false,
-    "needs_line_grounding": true
-  }
+  {"query_id": "cross_code_doc_001", "query": "max_concurrency TreeSearchConfig Runtime Settings", "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"], "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"], "query_type": "code_doc", "requires_cross_source": true, "needs_line_grounding": true},
+  {"query_id": "cross_code_doc_002", "query": "Where is max_concurrency defined and where is TreeSearchConfig documented?", "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"], "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"], "query_type": "code_doc", "requires_cross_source": true, "needs_line_grounding": true},
+  {"query_id": "cross_code_doc_003", "query": "TreeSearchConfig max_concurrency documentation Runtime Settings", "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"], "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"], "query_type": "code_doc", "requires_cross_source": true, "needs_line_grounding": true},
+  {"query_id": "cross_code_doc_004", "query": "Find the config definition and docs explanation for max_concurrency", "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"], "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"], "query_type": "code_doc", "requires_cross_source": true, "needs_line_grounding": true},
+  {"query_id": "cross_code_doc_005", "query": "Which code node defines max_concurrency and which doc section explains runtime settings?", "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"], "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"], "query_type": "code_doc", "requires_cross_source": true, "needs_line_grounding": true},
+  {"query_id": "cross_code_doc_006", "query": "max_concurrency worker parallelism TreeSearchConfig", "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"], "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"], "query_type": "code_doc", "requires_cross_source": true, "needs_line_grounding": true},
+  {"query_id": "cross_code_doc_007", "query": "Runtime Settings mentions TreeSearchConfig and max_concurrency", "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"], "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"], "query_type": "code_doc", "requires_cross_source": true, "needs_line_grounding": true},
+  {"query_id": "cross_code_doc_008", "query": "Trace max_concurrency from config code to runtime docs", "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"], "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"], "query_type": "code_doc", "requires_cross_source": true, "needs_line_grounding": true},
+  {"query_id": "cross_code_doc_009", "query": "What connects TreeSearchConfig to Runtime Settings?", "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"], "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"], "query_type": "code_doc", "requires_cross_source": true, "needs_line_grounding": true},
+  {"query_id": "cross_code_doc_010", "query": "code doc consistency max_concurrency Runtime Settings", "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"], "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"], "query_type": "code_doc", "requires_cross_source": true, "needs_line_grounding": true},
+
+  {"query_id": "single_config_001", "query": "cjk_tokenizer TreeSearchConfig", "gold_node_ids": ["config::2c0bc2b09fcec479"], "gold_source_paths": ["treesearch/config.py"], "query_type": "single_source_config", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "single_config_002", "query": "Where is cjk_tokenizer defined?", "gold_node_ids": ["config::2c0bc2b09fcec479"], "gold_source_paths": ["treesearch/config.py"], "query_type": "single_source_config", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "single_config_003", "query": "Find cjk_tokenizer in configuration code", "gold_node_ids": ["config::2c0bc2b09fcec479"], "gold_source_paths": ["treesearch/config.py"], "query_type": "single_source_config", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "single_config_004", "query": "TreeSearchConfig cjk tokenizer auto default", "gold_node_ids": ["config::2c0bc2b09fcec479"], "gold_source_paths": ["treesearch/config.py"], "query_type": "single_source_config", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "single_config_005", "query": "Which node contains cjk_tokenizer?", "gold_node_ids": ["config::2c0bc2b09fcec479"], "gold_source_paths": ["treesearch/config.py"], "query_type": "single_source_config", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "single_config_006", "query": "configuration cjk_tokenizer Chinese Japanese tokenization", "gold_node_ids": ["config::2c0bc2b09fcec479"], "gold_source_paths": ["treesearch/config.py"], "query_type": "single_source_config", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "single_config_007", "query": "TreeSearchConfig field cjk_tokenizer", "gold_node_ids": ["config::2c0bc2b09fcec479"], "gold_source_paths": ["treesearch/config.py"], "query_type": "single_source_config", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "single_config_008", "query": "lookup cjk_tokenizer default in config", "gold_node_ids": ["config::2c0bc2b09fcec479"], "gold_source_paths": ["treesearch/config.py"], "query_type": "single_source_config", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "single_config_009", "query": "runtime configuration cjk_tokenizer is defined in what class", "gold_node_ids": ["config::2c0bc2b09fcec479"], "gold_source_paths": ["treesearch/config.py"], "query_type": "single_source_config", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "single_config_010", "query": "source path for cjk_tokenizer TreeSearchConfig", "gold_node_ids": ["config::2c0bc2b09fcec479"], "gold_source_paths": ["treesearch/config.py"], "query_type": "single_source_config", "requires_cross_source": false, "needs_line_grounding": true},
+
+  {"query_id": "cli_doc_001", "query": "treesearch CLI Usage index command", "gold_node_ids": ["cli::aba57ea08154375b"], "gold_source_paths": ["docs/cli.md"], "query_type": "single_source_doc", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "cli_doc_002", "query": "Where is the treesearch index command documented?", "gold_node_ids": ["cli::aba57ea08154375b"], "gold_source_paths": ["docs/cli.md"], "query_type": "single_source_doc", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "cli_doc_003", "query": "CLI Usage treesearch documented_in", "gold_node_ids": ["cli::aba57ea08154375b"], "gold_source_paths": ["docs/cli.md"], "query_type": "single_source_doc", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "cli_doc_004", "query": "Find CLI Usage section for treesearch command", "gold_node_ids": ["cli::aba57ea08154375b"], "gold_source_paths": ["docs/cli.md"], "query_type": "single_source_doc", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "cli_doc_005", "query": "index command builds reusable local search index", "gold_node_ids": ["cli::aba57ea08154375b"], "gold_source_paths": ["docs/cli.md"], "query_type": "single_source_doc", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "cli_doc_006", "query": "docs cli treesearch usage", "gold_node_ids": ["cli::aba57ea08154375b"], "gold_source_paths": ["docs/cli.md"], "query_type": "single_source_doc", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "cli_doc_007", "query": "which document says treesearch is documented in CLI Usage", "gold_node_ids": ["cli::aba57ea08154375b"], "gold_source_paths": ["docs/cli.md"], "query_type": "single_source_doc", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "cli_doc_008", "query": "CLI index command local search index", "gold_node_ids": ["cli::aba57ea08154375b"], "gold_source_paths": ["docs/cli.md"], "query_type": "single_source_doc", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "cli_doc_009", "query": "treesearch command documentation source path", "gold_node_ids": ["cli::aba57ea08154375b"], "gold_source_paths": ["docs/cli.md"], "query_type": "single_source_doc", "requires_cross_source": false, "needs_line_grounding": true},
+  {"query_id": "cli_doc_010", "query": "single source doc query for CLI Usage", "gold_node_ids": ["cli::aba57ea08154375b"], "gold_source_paths": ["docs/cli.md"], "query_type": "single_source_doc", "requires_cross_source": false, "needs_line_grounding": true}
 ]

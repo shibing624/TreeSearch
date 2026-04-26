@@ -14,30 +14,30 @@ Example:
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Optional
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from treesearch import TreeSearch, TreeSearchGraphRAG
 from treesearch.rag import (
     ExpansionConfig,
-    EvidenceChain,
-    EvidenceCitation,
-    GroundedAnswer,
     PreExtractedTripletExtractor,
     RealRepoSample,
     RuleBasedTripletExtractor,
-    VerificationResult,
-    aggregate_eval_results,
     evaluate_grounded_answer,
 )
-from treesearch.rag.models import make_graph_node_id
+from examples.graphrag.baselines import answer_row, baseline_methods, run_retrieval_baseline
+from examples.graphrag.metrics import aggregate_method_summary
+from examples.graphrag.report import format_markdown_summary, write_reports
 from treesearch.rag.llm import LLMClient, OpenAIChatClient
 from treesearch.rag.sqlite_graph_store import SQLiteGraphStore
-from treesearch.tree import Document
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FIXTURE_REPO = REPO_ROOT / "examples" / "graphrag" / "fixtures" / "repo"
 DEFAULT_QUERIES = REPO_ROOT / "examples" / "graphrag" / "fixtures" / "queries.json"
 DEFAULT_TRIPLETS = REPO_ROOT / "examples" / "graphrag" / "fixtures" / "triplets.json"
@@ -75,6 +75,7 @@ def run(
     triplets_path: Optional[Path] = None,
     output_path: Optional[Path] = None,
     markdown_path: Optional[Path] = None,
+    latex_path: Optional[Path] = None,
     baseline: str = "both",
     graph_store: str = "memory",
     graph_store_path: Optional[Path] = None,
@@ -92,7 +93,8 @@ def run(
     }
     method_results = {}
 
-    if baseline in {"both", "graphrag"}:
+    methods = _selected_methods(baseline)
+    if "graphrag" in methods:
         graph_rows, graph_metrics, build_stats, graph_runtime = _run_graphrag(
             ts=ts,
             samples=samples,
@@ -103,21 +105,29 @@ def run(
             llm_model=llm_model,
         )
         report["build_stats"]["graphrag"] = build_stats
-        report["summary"]["graphrag"] = _with_runtime_summary(graph_metrics, graph_runtime)
+        report["summary"]["graphrag"] = aggregate_method_summary(
+            graph_metrics,
+            latency_seconds=graph_runtime["latency_seconds"],
+            llm_calls=graph_runtime["llm_calls"],
+        )
         method_results["graphrag"] = graph_rows
 
-    if baseline in {"both", "treesearch"}:
-        tree_rows, tree_metrics, tree_runtime = _run_treesearch_baseline(ts, samples)
-        report["summary"]["treesearch"] = _with_runtime_summary(tree_metrics, tree_runtime)
-        method_results["treesearch"] = tree_rows
+    for method in methods:
+        if method == "graphrag":
+            continue
+        rows, metrics, runtime = run_retrieval_baseline(method, ts, samples)
+        report["summary"][method] = aggregate_method_summary(
+            metrics,
+            latency_seconds=runtime["latency_seconds"],
+            llm_calls=runtime["llm_calls"],
+        )
+        method_results[method] = rows
 
     report["results"] = method_results
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    if markdown_path is not None:
-        markdown_path.parent.mkdir(parents=True, exist_ok=True)
-        markdown_path.write_text(_format_markdown_summary(report), encoding="utf-8")
+    write_reports(report, markdown_path=markdown_path, latex_path=latex_path)
     return report
 
 
@@ -157,7 +167,7 @@ def _run_graphrag(
         answer = rag.query(sample.query)
         result = evaluate_grounded_answer(sample, answer)
         metrics.append(result)
-        rows.append(_answer_row("graphrag", sample, answer, result))
+        rows.append(answer_row("graphrag", sample, answer, result))
     runtime = _runtime_summary(started, len(samples), llm_client)
     return rows, metrics, {
         "documents": build_stats.documents,
@@ -165,32 +175,6 @@ def _run_graphrag(
         "relations": build_stats.relations,
         "structural_edges": build_stats.structural_edges,
     }, runtime
-
-
-def _run_treesearch_baseline(ts: TreeSearch, samples: list[RealRepoSample]) -> tuple[list[dict], list, dict]:
-    started = time.perf_counter()
-    rows = []
-    metrics = []
-    doc_map = {document.doc_id: document for document in ts.documents}
-    for sample in samples:
-        result = ts.search(
-            sample.query,
-            top_k_docs=5,
-            max_nodes_per_doc=5,
-            include_ancestors=True,
-            merge_strategy="global_score",
-        )
-        answer = _treesearch_result_to_answer(sample.query, result, doc_map)
-        eval_result = evaluate_grounded_answer(sample, answer)
-        metrics.append(eval_result)
-        rows.append(_answer_row("treesearch", sample, answer, eval_result))
-    return rows, metrics, _runtime_summary(started, len(samples), None)
-
-
-def _with_runtime_summary(metrics: list, runtime: dict) -> dict:
-    summary = aggregate_eval_results(metrics)
-    summary.update(runtime)
-    return summary
 
 
 def _runtime_summary(started: float, sample_count: int, llm_client: LLMClient | None) -> dict:
@@ -202,90 +186,14 @@ def _runtime_summary(started: float, sample_count: int, llm_client: LLMClient | 
     }
 
 
-def _treesearch_result_to_answer(query: str, result: dict, doc_map: dict[str, Document]) -> GroundedAnswer:
-    citations = []
-    selected_node_ids = []
-    snippets = []
-    for node in result.get("flat_nodes", [])[:5]:
-        node_id = str(node.get("node_id", ""))
-        doc_id = str(node.get("doc_id", ""))
-        if not node_id or not doc_id:
-            continue
-        source_node = doc_map[doc_id].get_node_by_id(node_id) if doc_id in doc_map else None
-        selected_node_ids.append(make_graph_node_id(doc_id, node_id))
-        citations.append(
-            EvidenceCitation(
-                node_id=node_id,
-                doc_id=doc_id,
-                source_path=str(node.get("source_path", "")),
-                line_start=node.get("line_start") or (source_node.get("line_start") if source_node else None),
-                line_end=node.get("line_end") or (source_node.get("line_end") if source_node else None),
-            )
-        )
-        snippets.append(str(node.get("text", "") or node.get("snippet", "")))
-
-    chain = EvidenceChain(
-        query=query,
-        bridge_entities=(),
-        selected_relation_ids=(),
-        selected_node_ids=tuple(dict.fromkeys(selected_node_ids)),
-        reasoning_chain=tuple(snippet for snippet in snippets if snippet),
-        citations=tuple(citations),
-        evidence_sufficiency=bool(citations),
-    )
-    return GroundedAnswer(
-        query=query,
-        answer="\n".join(chain.reasoning_chain),
-        evidence_chain=chain,
-        verification=VerificationResult(ok=bool(citations)),
-    )
-
-
-def _answer_row(method: str, sample: RealRepoSample, answer: GroundedAnswer, metrics) -> dict:
-    return {
-        "method": method,
-        "query_id": sample.query_id,
-        "query": sample.query,
-        "answer": answer.answer,
-        "verification_ok": answer.verification.ok,
-        "verification_errors": list(answer.verification.errors),
-        "node_recall": metrics.node_recall,
-        "source_path_recall": metrics.source_path_recall,
-        "citation_precision": metrics.citation_precision,
-        "citation_recall": metrics.citation_recall,
-        "line_grounding_accuracy": metrics.line_grounding_accuracy,
-        "task_success": metrics.task_success,
-        "citations": [
-            {
-                "node_id": citation.node_id,
-                "doc_id": citation.doc_id,
-                "source_path": citation.source_path,
-                "line_start": citation.line_start,
-                "line_end": citation.line_end,
-            }
-            for citation in answer.evidence_chain.citations
-        ],
-    }
-
-
-def _format_markdown_summary(report: dict) -> str:
-    lines = [
-        "# GraphRAG RealRepoBench Summary",
-        "",
-        "| method | count | node_recall | source_path_recall | citation_precision | citation_recall | line_grounding_accuracy | task_success_rate | latency_seconds | avg_latency_seconds | llm_calls |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-    ]
-    for method, summary in report["summary"].items():
-        lines.append(
-            "| {method} | {count} | {node_recall:.3f} | {source_path_recall:.3f} | "
-            "{citation_precision:.3f} | {citation_recall:.3f} | {line_grounding_accuracy:.3f} | "
-            "{task_success_rate:.3f} | {latency_seconds:.3f} | {avg_latency_seconds:.3f} | {llm_calls} |".format(
-                method=method,
-                **summary,
-            )
-        )
-    lines.append("")
-    return "\n".join(lines)
+def _selected_methods(baseline: str) -> tuple[str, ...]:
+    if baseline == "both":
+        return ("graphrag", "treesearch")
+    if baseline == "all":
+        return baseline_methods()
+    if baseline in baseline_methods():
+        return (baseline,)
+    raise ValueError(f"unsupported baseline: {baseline}")
 
 
 def main() -> None:
@@ -295,7 +203,8 @@ def main() -> None:
     parser.add_argument("--triplets", default=str(DEFAULT_TRIPLETS))
     parser.add_argument("--output", default="output/graphrag_real_repo_results.json")
     parser.add_argument("--markdown-output", default="output/graphrag_real_repo_results.md")
-    parser.add_argument("--baseline", choices=["both", "graphrag", "treesearch"], default="both")
+    parser.add_argument("--latex-output")
+    parser.add_argument("--baseline", choices=["both", "all", *baseline_methods()], default="both")
     parser.add_argument("--graph-store", choices=["memory", "sqlite"], default="memory")
     parser.add_argument("--graph-store-path")
     parser.add_argument("--use-llm", action="store_true")
@@ -308,6 +217,7 @@ def main() -> None:
         triplets_path=Path(args.triplets) if args.triplets else None,
         output_path=Path(args.output),
         markdown_path=Path(args.markdown_output) if args.markdown_output else None,
+        latex_path=Path(args.latex_output) if args.latex_output else None,
         baseline=args.baseline,
         graph_store=args.graph_store,
         graph_store_path=Path(args.graph_store_path) if args.graph_store_path else None,
@@ -317,7 +227,9 @@ def main() -> None:
     print(f"Wrote {args.output}")
     if args.markdown_output:
         print(f"Wrote {args.markdown_output}")
-    print(_format_markdown_summary(report))
+    if args.latex_output:
+        print(f"Wrote {args.latex_output}")
+    print(format_markdown_summary(report))
 
 
 if __name__ == "__main__":

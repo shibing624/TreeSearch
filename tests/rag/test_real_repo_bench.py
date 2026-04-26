@@ -26,8 +26,8 @@ def test_real_repo_bench_runs_graph_and_treesearch_baselines(tmp_path):
     assert markdown_path.exists()
     assert "graphrag" in report["summary"]
     assert "treesearch" in report["summary"]
-    assert report["summary"]["graphrag"]["count"] == 3
-    assert report["summary"]["treesearch"]["count"] == 3
+    assert report["summary"]["graphrag"]["count"] == 30
+    assert report["summary"]["treesearch"]["count"] == 30
     assert report["summary"]["graphrag"]["latency_seconds"] >= 0.0
     assert report["summary"]["graphrag"]["avg_latency_seconds"] >= 0.0
     assert report["summary"]["graphrag"]["llm_calls"] == 0

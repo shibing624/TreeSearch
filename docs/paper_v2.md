@@ -537,6 +537,71 @@ System：
 | w/o verifier | | | | |
 | chunk graph | | | | |
 
+### 表 4：RealRepoBench-mini pilot 结果
+
+当前代码已经可以生成一个 30-query `RealRepoBench-mini` pilot。这个 pilot 只用于验证实验链路和表格生成，不作为论文最终主结果；正式论文需要扩展到 100-300 条跨 repo 标注样本。
+
+运行命令：
+
+```bash
+python examples/graphrag/real_repo_bench.py \
+  --paths examples/graphrag/fixtures/repo \
+  --queries examples/graphrag/fixtures/queries.json \
+  --triplets examples/graphrag/fixtures/triplets.json \
+  --baseline all \
+  --graph-store sqlite \
+  --graph-store-path tmp/graphrag_mini_graph.db \
+  --output tmp/graphrag_mini_all_results.json \
+  --markdown-output tmp/graphrag_mini_all_results.md \
+  --latex-output tmp/graphrag_mini_all_results.tex
+```
+
+Pilot 表：
+
+| Method | Count | Node Recall | Source Recall | Citation Precision | Citation Recall | Line Accuracy | Task Success | Avg Latency | LLM Calls/q |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| TreeSearch-guided GraphRAG | 30 | 1.000 | 1.000 | 0.633 | 1.000 | 1.000 | 1.000 | 0.015s | 0.000 |
+| TreeSearch RAG | 30 | 1.000 | 1.000 | 0.661 | 1.000 | 1.000 | 1.000 | 0.013s | 0.000 |
+| FTS5 RAG | 30 | 1.000 | 1.000 | 0.661 | 1.000 | 1.000 | 1.000 | 0.014s | 0.000 |
+| Dense lexical proxy | 30 | 1.000 | 1.000 | 0.444 | 1.000 | 1.000 | 1.000 | <0.001s | 0.000 |
+| Hybrid lexical proxy | 30 | 1.000 | 1.000 | 0.444 | 1.000 | 1.000 | 1.000 | 0.013s | 0.000 |
+| GraphRAG + real LLM selector/answer | 30 | 0.967 | 0.967 | 1.000 | 0.967 | 1.000 | 0.933 | 3.629s | 2.000 |
+
+Pilot 观察：
+
+1. 30 条样本目前过于简单，所有非 LLM 方法 task success 都接近满分，不能用于论文 claim。
+2. LLM selector/answer 的 citation precision 更高，但 task success 略低，说明 evidence selection prompt 需要在正式实验前调优。
+3. 当前 `dense` 和 `hybrid` 是无外部依赖的 lexical proxy，只用于 harness smoke；正式论文必须替换为 OpenAI/BGE embedding + FAISS 或 SQLite vector cache。
+4. 这个 pilot 已验证 JSON、Markdown、LaTeX 表格链路、SQLite graph store、真实 LLM API、line grounding metrics 和 baseline adapter 能跑通。
+
+### 表 5：正式实验执行矩阵
+
+为了达到可投稿标准，最终实验必须分三层：
+
+| Layer | Purpose | Dataset | Methods | Required Output |
+|---|---|---|---|---|
+| RealRepoBench-main | 主结果，验证异构仓库结构与 grounding | 100-300 queries, 3-5 repos | Dense RAG, FTS5 RAG, Hybrid RAG, TreeSearch RAG, Vector Graph RAG, Ours | Table 2, per-type breakdown, case studies |
+| Public multi-hop | 对齐 GraphRAG / IRCoT / LightRAG 文献 | HotpotQA, MuSiQue, 2Wiki | Dense RAG, IRCoT, LightRAG/HippoRAG, Vector Graph RAG, Ours | Table 1, evidence recall, cost |
+| Ablation suite | 证明核心创新点有效 | RealRepoBench-main + selected public split | Ours variants | Table 3, sensitivity plots |
+
+正式 RealRepoBench-main 标注协议：
+
+1. 每条 query 必须有 `gold_node_ids`、`gold_source_paths`、`gold_line_ranges`、`gold_answer`。
+2. 每条 query 标注 `query_type`、`difficulty`、`requires_cross_source`、`needs_line_grounding`。
+3. 每个 repo 至少覆盖 code、docs、config、CLI/API、troubleshooting 五类问题。
+4. 至少 40% query 必须跨两个以上 source type。
+5. 至少 50% query 必须要求 line-level citation。
+
+正式 baseline 替换要求：
+
+1. `dense`：使用真实 embedding baseline，推荐 `text-embedding-3-small` 或 BGE-M3，缓存到 SQLite/FAISS。
+2. `hybrid`：FTS5/TreeSearch seed + dense rerank，不能再使用 lexical proxy。
+3. `Vector Graph RAG`：复用 `/Users/xuming/Documents/Codes/vector-graph-rag`，固定同一 LLM/embedding 配置。
+4. `IRCoT`：实现 2-3 step iterative retrieval，记录 LLM calls 和 latency。
+5. `LightRAG/HippoRAG`：至少接入一个公开实现作为 external baseline。
+
+正式论文 claim 只有在上述实验完成后才能写成 strong claim；当前 pilot 只能写成 implementation validation。
+
 ## 10. 6 页正文结构
 
 ### Page 1
