@@ -49,5 +49,7 @@ Default outputs:
 | `dense` | Zhipu `embedding-3` dense retrieval with JSON embedding cache |
 | `hybrid` | Reciprocal-rank merge of TreeSearch and Zhipu dense retrieval |
 | `graphrag` | TreeSearch GraphRAG path using a lightweight public-QA title/entity extractor |
+| `graphrag_no_structure` | GraphRAG ablation without structural expansion/scoring |
+| `graphrag_no_entity` | GraphRAG ablation without entity mention bridges |
 
 The current public QA runner is still a pilot. It reports supporting-passage `Recall@K`, `Hit@K`, `MRR`, extractive answer exact match/accuracy/F1, and latency. It does not yet evaluate generated answers, LLM reranking, IRCoT, HippoRAG, or Vector Graph RAG under matched settings.

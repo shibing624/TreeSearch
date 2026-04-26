@@ -621,6 +621,79 @@ Public pilot 观察：
 5. 公开 QA 数据能验证通用 multi-hop retrieval，但不是 TreeSearch-Guided GraphRAG 的最终主战场；它缺少代码、配置、文档树和 line grounding 等结构信号。论文强 claim 仍应放在 RealRepoBench-main，public QA 作为与 GraphRAG 文献对齐的补充实验。
 6. 下一步要接入 Vector Graph RAG/HippoRAG 预抽取 triplets、IRCoT 和生成式 answer LLM，形成正式 Table 1；当前表可写成 engineering pilot / early evidence，不应直接写成最终 SOTA claim。
 
+GraphRAG 消融 pilot：
+
+| Dataset | Variant | Recall@1 | Recall@5 | Recall@10 | MRR | Acc | F1 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| test_sample | full GraphRAG | 0.450 | 0.850 | 0.850 | 0.950 | 0.600 | 0.179 |
+| test_sample | w/o structure expansion | 0.450 | 0.850 | 0.850 | 0.950 | 0.600 | 0.179 |
+| test_sample | w/o entity bridge | 0.450 | 1.000 | 1.000 | 0.950 | 0.400 | 0.126 |
+| HotpotQA | full GraphRAG | 0.280 | 0.510 | 0.510 | 0.700 | 0.160 | 0.052 |
+| HotpotQA | w/o structure expansion | 0.280 | 0.510 | 0.510 | 0.700 | 0.160 | 0.052 |
+| HotpotQA | w/o entity bridge | 0.300 | 0.740 | 0.740 | 0.739 | 0.180 | 0.052 |
+| MuSiQue | full GraphRAG | 0.192 | 0.273 | 0.273 | 0.513 | 0.000 | 0.022 |
+| MuSiQue | w/o structure expansion | 0.192 | 0.273 | 0.273 | 0.513 | 0.000 | 0.022 |
+| MuSiQue | w/o entity bridge | 0.195 | 0.387 | 0.387 | 0.589 | 0.060 | 0.027 |
+| 2WikiMultiHopQA | full GraphRAG | 0.335 | 0.400 | 0.400 | 0.813 | 0.160 | 0.063 |
+| 2WikiMultiHopQA | w/o structure expansion | 0.335 | 0.400 | 0.400 | 0.813 | 0.160 | 0.063 |
+| 2WikiMultiHopQA | w/o entity bridge | 0.320 | 0.625 | 0.625 | 0.843 | 0.140 | 0.063 |
+
+消融解释：
+
+1. `w/o structure expansion` 与 full GraphRAG 基本相同，说明 public QA corpus 是扁平 Wikipedia passage，几乎没有 TreeSearch 能利用的层级结构。这支持“public QA 只能做通用 multi-hop 对齐，不能证明 structure-preserving 优势”的判断。
+2. `w/o entity bridge` 在多个 public QA 子集上反而更强，说明当前轻量 title/entity extractor 会引入噪声实体桥；正式 public QA 需要使用 Vector Graph RAG/HippoRAG 的 OpenIE triplets 或 LLM extractor。
+3. 对论文有利的写法不是“GraphRAG 已经赢”，而是“public QA 暴露了通用 GraphRAG 对 extractor quality 的依赖；TreeSearch-node graph 的结构优势必须在代码仓库/异构文档任务中验证”。
+
+### 推荐的实验组合策略
+
+第一层：公开 multi-hop QA（对齐文献）
+
+目标：在 HotpotQA、MuSiQue、2WikiMultiHopQA 上证明 TreeSearch-guided GraphRAG 至少不弱于 LightRAG/HippoRAG 的公开多跳能力，并报告 retrieval + answer 两类指标。
+
+必须包含：
+
+1. Datasets：HotpotQA、MuSiQue、2WikiMultiHopQA。
+2. Methods：FTS5 BM25、Zhipu Dense、Hybrid、TreeSearch、TreeSearch GraphRAG、Vector Graph RAG、IRCoT、LightRAG/HippoRAG。
+3. Metrics：Recall@1/5/10、MRR、Answer EM/F1、LLM calls、latency、cost。
+4. Table：论文表 1。
+
+当前状态：已完成本 repo 方法的 50-query pilot 和 GraphRAG 消融；缺 Vector Graph RAG、IRCoT、LightRAG/HippoRAG 同设置对照。
+
+第二层：GraphRAG 专项（证明 GraphRAG 优势）
+
+目标：使用 GraphRAG-Bench 对齐 9 种已有 GraphRAG 方法，证明 structure-preserving node graph 在 GraphRAG 专项任务上有增益。
+
+必须包含：
+
+1. Dataset：GraphRAG-Bench。
+2. Methods：GraphRAG-Bench 原始 9 个 GraphRAG baselines + TreeSearch-node GraphRAG。
+3. Metrics：benchmark 原生 answer correctness / faithfulness / evidence retrieval 指标，以及 LLM calls、latency、cost。
+4. Table：GraphRAG 专项主表，作为论文表 2 或附录主表。
+
+局限：GraphRAG-Bench 不含代码仓库结构、函数定位、配置文件和 line grounding，所以只能证明 GraphRAG 能力，不能证明 TreeSearch 的核心结构优势。
+
+第三层：代码仓库（证明代码定位能力）
+
+目标：用 RepoQA 和 CodeSearchNet 证明 TreeSearch seed 能精确定位函数/类/配置节点，并展示 TreeSearch-node guided GraphRAG 在代码问答上的 grounding 优势。
+
+必须包含：
+
+1. RepoQA：500 tests，主打 repository-level QA / function localization。
+2. CodeSearchNet：代码检索基线，主打 natural language query -> function retrieval。
+3. Methods：FTS5、Zhipu Dense、Hybrid、TreeSearch auto/tree/flat、TreeSearch-node GraphRAG。
+4. Metrics：MRR、Recall@1/5/10、function hit rate、source path accuracy、line accuracy、answer EM/F1。
+5. Role：补充实验，不主推；主推仍然是 RealRepoBench-main 的异构仓库结构与 grounding。
+
+消融实验矩阵：
+
+| Ablation | Purpose | Expected Signal |
+|---|---|---|
+| w/o TreeSearch seed | 证明 TreeSearch seed 提供高精度起点 | Recall@1/MRR 下降 |
+| w/o structure expansion | 证明层级/邻接结构只在结构化仓库里有效 | public QA 变化小，repo tasks 下降 |
+| w/o entity bridge | 证明 OpenIE/entity bridge 的质量边界 | public QA 可能变好或变坏，取决于 extractor noise |
+| w/o verifier | 证明 citation/line grounding verifier 必要 | citation precision / line accuracy 下降 |
+| chunk graph instead of node graph | 证明 TreeSearch node graph 优于 arbitrary chunks | source path / line accuracy 下降 |
+
 ### 表 6：正式实验执行矩阵
 
 为了达到可投稿标准，最终实验必须分三层：
