@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import pickle
+import re
 import sys
 import time
 import urllib.request
@@ -58,8 +59,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from treesearch import build_index
+from treesearch import TreeSearch, TreeSearchGraphRAG, build_index
 from treesearch.fts import FTS5Index
+from treesearch.rag import ExpansionConfig
+from treesearch.rag.models import GraphNodePassage, GraphRelation
 from treesearch.tree import Document, flatten_tree
 
 from metrics import (
@@ -468,6 +471,87 @@ class TreeSearchCodeAutoIndex:
             return self.base.search(query, top_k)
 
 
+class CodeTripletExtractor:
+    """Lightweight code relation extractor for CodeSearchNet GraphRAG smoke runs."""
+
+    def extract(self, passage: GraphNodePassage) -> list[GraphRelation]:
+        subject = passage.title or passage.doc_name
+        if not subject:
+            return []
+        identifiers = _code_identifiers(" ".join([passage.title, passage.text]))
+        relations = []
+        for identifier in identifiers:
+            text = f"{subject} mentions {identifier}"
+            relations.append(
+                GraphRelation(
+                    relation_id=_code_relation_id(passage.graph_node_id, text),
+                    subject=subject,
+                    predicate="mentions",
+                    object=identifier,
+                    text=text,
+                    node_id=passage.node_id,
+                    doc_id=passage.doc_id,
+                    source_type=passage.source_type,
+                )
+            )
+        return relations
+
+
+class TreeSearchCodeGraphRAGIndex:
+    """TreeSearch-node GraphRAG adapter with the same interface as code retrievers."""
+
+    def __init__(self, base_index: TreeSearchCodeIndex):
+        self.base = base_index
+        self.tree_search = TreeSearch(db_path=None)
+        self.tree_search.documents = list(base_index.documents)
+        self.rag = TreeSearchGraphRAG.from_tree_search(
+            self.tree_search,
+            extractor=CodeTripletExtractor(),
+            expansion_config=ExpansionConfig(max_relations=30, max_hops=1),
+        )
+        self.rag.build_graph()
+
+    def search(self, query: str, top_k: int = 10) -> list[tuple[int, float]]:
+        answer = self.rag.query(query)
+        output = []
+        seen_idx = set()
+        for citation in answer.evidence_chain.citations:
+            idx = _idx_from_doc_reference(citation.source_path or citation.doc_id)
+            if idx is None or idx in seen_idx:
+                continue
+            seen_idx.add(idx)
+            output.append((idx, 1.0 / (len(output) + 1)))
+            if len(output) >= top_k:
+                break
+        if output:
+            return output
+        return TreeSearchCodeAutoIndex(self.base).search(query, top_k=top_k)
+
+
+def _code_identifiers(text: str, max_identifiers: int = 40) -> list[str]:
+    identifiers = []
+    for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text):
+        if len(token) < 2:
+            continue
+        if token in {"def", "return", "class", "self", "None", "True", "False"}:
+            continue
+        identifiers.append(token)
+    return list(dict.fromkeys(identifiers))[:max_identifiers]
+
+
+def _code_relation_id(graph_node_id: str, text: str) -> str:
+    payload = f"{graph_node_id}:{text}"
+    return hashlib.blake2b(payload.encode("utf-8"), digest_size=8).hexdigest()
+
+
+def _idx_from_doc_reference(value: str) -> int | None:
+    try:
+        basename = os.path.basename(value)
+        return int(basename.split("_")[1].split(".")[0])
+    except (IndexError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
@@ -544,6 +628,7 @@ async def main():
     parser.add_argument("--output-dir", type=str, default=os.path.join(_script_dir, "benchmark_results", "codesearchnet"), help="Output directory")
     parser.add_argument("--index-dir", type=str, default=os.path.join(_script_dir, "indexes", "codesearchnet"), help="Index directory")
     parser.add_argument("--with-embedding", action="store_true", help="Also evaluate embedding-based retrieval")
+    parser.add_argument("--with-graphrag", action="store_true", help="Also evaluate TreeSearch-node GraphRAG retrieval")
     args = parser.parse_args()
 
     # Load dataset
@@ -596,6 +681,17 @@ async def main():
     auto_metrics["index_time"] = ts_index_time
     auto_metrics["num_nodes"] = ts_metrics["num_nodes"]
     results["treesearch_auto"] = auto_metrics
+
+    if args.with_graphrag:
+        print(f"\n{'=' * 60}")
+        print("Strategy: TREESEARCH-NODE GRAPHRAG")
+        print(f"{'=' * 60}")
+
+        graph_index = TreeSearchCodeGraphRAGIndex(ts_index)
+        graph_metrics = evaluate_retrieval(query_samples, graph_index)
+        graph_metrics["index_time"] = ts_index_time
+        graph_metrics["num_nodes"] = ts_metrics["num_nodes"]
+        results["treesearch_graphrag"] = graph_metrics
 
     # Embedding evaluation (optional)
     if args.with_embedding:
