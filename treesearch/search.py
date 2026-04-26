@@ -386,6 +386,8 @@ def _merge_doc_results(
                 node_copy = dict(node)
                 node_copy["_doc_id"] = r.get("doc_id", "")
                 node_copy["_doc_name"] = r.get("doc_name", "")
+                node_copy["_source_type"] = r.get("source_type", "")
+                node_copy["_source_path"] = r.get("source_path", "")
                 all_nodes.append(node_copy)
         all_nodes.sort(key=lambda x: (-x.get("score", 0), x.get("node_id", "")))
 
@@ -395,8 +397,16 @@ def _merge_doc_results(
         for node in all_nodes:
             did = node.pop("_doc_id", "")
             dname = node.pop("_doc_name", "")
+            source_type = node.pop("_source_type", "")
+            source_path = node.pop("_source_path", "")
             if did not in seen_docs:
-                seen_docs[did] = {"doc_id": did, "doc_name": dname, "nodes": []}
+                seen_docs[did] = {
+                    "doc_id": did,
+                    "doc_name": dname,
+                    "source_type": source_type,
+                    "source_path": source_path,
+                    "nodes": [],
+                }
                 merged.append(seen_docs[did])
             seen_docs[did]["nodes"].append(node)
         return merged
@@ -728,6 +738,8 @@ async def _search_tree_mode(
             doc_results.append({
                 "doc_id": doc.doc_id,
                 "doc_name": doc.doc_name,
+                "source_type": doc.source_type,
+                "source_path": doc.metadata.get("source_path", ""),
                 "nodes": enriched_nodes,
             })
 
@@ -745,6 +757,8 @@ async def _search_tree_mode(
                 "node_id": node.get("node_id", ""),
                 "doc_id": doc_result.get("doc_id", ""),
                 "doc_name": doc_result.get("doc_name", ""),
+                "source_type": doc_result.get("source_type", ""),
+                "source_path": doc_result.get("source_path", ""),
                 "title": node.get("title", ""),
                 "score": node.get("score", 0),
                 "text": node.get("text", ""),
@@ -824,7 +838,13 @@ async def _search_flat_mode(
                 })
             _attach_node_fields(nodes, doc, text_mode=text_mode, include_ancestors=include_ancestors)
             if nodes:
-                doc_results.append({"doc_id": doc.doc_id, "doc_name": doc.doc_name, "nodes": nodes})
+                doc_results.append({
+                    "doc_id": doc.doc_id,
+                    "doc_name": doc.doc_name,
+                    "source_type": doc.source_type,
+                    "source_path": doc.metadata.get("source_path", ""),
+                    "nodes": nodes,
+                })
     else:
         async def _search_doc(doc: Document) -> dict:
             nodes = []
@@ -841,7 +861,13 @@ async def _search_flat_mode(
                         break
 
             _attach_node_fields(nodes, doc, text_mode=text_mode, include_ancestors=include_ancestors)
-            return {"doc_id": doc.doc_id, "doc_name": doc.doc_name, "nodes": nodes}
+            return {
+                "doc_id": doc.doc_id,
+                "doc_name": doc.doc_name,
+                "source_type": doc.source_type,
+                "source_path": doc.metadata.get("source_path", ""),
+                "nodes": nodes,
+            }
 
         raw_results = await asyncio.gather(*(_search_doc(d) for d in selected))
         doc_results = list(raw_results)
@@ -858,6 +884,8 @@ async def _search_flat_mode(
                 "node_id": node.get("node_id", ""),
                 "doc_id": doc_result.get("doc_id", ""),
                 "doc_name": doc_result.get("doc_name", ""),
+                "source_type": doc_result.get("source_type", ""),
+                "source_path": doc_result.get("source_path", ""),
                 "title": node.get("title", ""),
                 "score": node.get("score", 0),
                 "text": node.get("text", ""),

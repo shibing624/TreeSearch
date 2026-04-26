@@ -1,0 +1,9 @@
+[
+  {
+    "query_id": "demo_001",
+    "query": "max_concurrency TreeSearchConfig Runtime Settings",
+    "query_type": "code_doc",
+    "requires_cross_source": true,
+    "needs_line_grounding": true
+  }
+]

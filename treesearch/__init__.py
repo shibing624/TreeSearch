@@ -65,6 +65,7 @@ from treesearch.config import (
 from treesearch.fts import FTS5Index
 from treesearch.tree_searcher import TreeSearcher, PathResult
 from treesearch.heuristics import build_query_plan, QueryPlan
+from treesearch.rag import TreeSearchGraphRAG
 
 __all__ = [
     # Primary
@@ -82,4 +83,6 @@ __all__ = [
     "INDEX_SCHEMA_VERSION",
     # FTS5
     "FTS5Index",
+    # Optional GraphRAG
+    "TreeSearchGraphRAG",
 ]
