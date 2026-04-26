@@ -665,8 +665,8 @@ GraphRAG 消融 pilot：
 
 必须包含：
 
-1. Dataset：GraphRAG-Bench（官方仓库：[GraphRAG-Bench/GraphRAG-Benchmark](https://github.com/GraphRAG-Bench/GraphRAG-Benchmark)，论文：[arXiv:2506.02404](https://arxiv.org/abs/2506.02404)）。
-2. Methods：GraphRAG-Bench 原始 9 个 GraphRAG baselines + TreeSearch-node GraphRAG。公开资料中的代表方法包括 RAPTOR、KGP、LightRAG、Microsoft GraphRAG、HippoRAG、GFM-RAG、ToG 等。
+1. Dataset：优先使用带 9 方法公开对比的 CS textbook GraphRAG-Bench（仓库：[jeremycp3/GraphRAG-Bench](https://github.com/jeremycp3/GraphRAG-Bench)，数据：[Awesome-GraphRAG/GraphRAG-Bench](https://huggingface.co/datasets/Awesome-GraphRAG/GraphRAG-Bench)，论文：[arXiv:2506.02404](https://arxiv.org/abs/2506.02404)）。另一个较新的 [GraphRAG-Bench/GraphRAG-Benchmark](https://github.com/GraphRAG-Bench/GraphRAG-Benchmark) 更适合作为后续 adapter schema 参考。
+2. Methods：GraphRAG-Bench 原始 9 个 GraphRAG baselines + TreeSearch-node GraphRAG。公开资料中的代表方法包括 RAPTOR、KGP、LightRAG、Microsoft GraphRAG、HippoRAG、GFM-RAG、ToG 等；公开表可先作为 external comparison，再逐步本地复现关键 baseline。
 3. Metrics：benchmark 原生 answer correctness / faithfulness / evidence retrieval 指标，以及 LLM calls、latency、cost。
 4. Table：GraphRAG 专项主表，作为论文表 2 或附录主表。
 
