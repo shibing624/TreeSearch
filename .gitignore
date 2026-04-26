@@ -257,3 +257,6 @@ evaluation/data/repoqa/
 evaluation/data/repoqa-*.json
 evaluation/data/codesearchnet_cache/
 evaluation/data/
+
+# Confidential paper draft
+docs/paper_v2.md
