@@ -10,7 +10,7 @@ from treesearch.rag.graph_builder import NodeGraphBuilder
 from treesearch.rag.graph_store import InMemoryGraphStore
 from treesearch.rag.llm import LLMClient
 from treesearch.rag.models import EvidenceChain, ExpansionConfig, GraphBuildStats, GroundedAnswer
-from treesearch.rag.seed import retrieve_seed_nodes
+from treesearch.rag.seed import aretrieve_seed_nodes, retrieve_seed_nodes
 from treesearch.rag.verifier import EvidenceVerifier
 
 
@@ -88,7 +88,21 @@ class TreeSearchGraphRAG:
         chain = self.selector.select(query, candidates, self.store)
         return chain
 
+    async def aretrieve(self, query: str) -> EvidenceChain:
+        """Async retrieval path for benchmark runners and web servers."""
+        if self._last_build_stats is None and self.store.stats()["passages"] == 0:
+            self.build_graph()
+        seeds = await aretrieve_seed_nodes(query, self.tree_search.documents)
+        candidates = self.expander.expand(query, seeds)
+        chain = self.selector.select(query, candidates, self.store)
+        return chain
+
     def query(self, query: str) -> GroundedAnswer:
         chain = self.retrieve(query)
+        verification = self.verifier.verify(chain)
+        return self.answer_generator.generate(query, chain, verification)
+
+    async def aquery(self, query: str) -> GroundedAnswer:
+        chain = await self.aretrieve(query)
         verification = self.verifier.verify(chain)
         return self.answer_generator.generate(query, chain, verification)

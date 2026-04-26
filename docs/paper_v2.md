@@ -679,6 +679,16 @@ GraphRAG 消融 pilot：
 3. 保留 benchmark 原生 judge/evaluation，不改指标，避免被审稿人认为自定义评测偏置。
 4. 与原始 9 个 baselines 的公开结果对齐，不必一开始全部本地复现。
 
+当前结果状态（2026-04-26）：
+
+| Item | Status | Result / Blocker |
+|---|---|---|
+| 9-method public reference | 已确认可作为 external comparison | 公开表中 RAPTOR 平均 accuracy 73.58，HippoRAG 72.64，Microsoft GraphRAG 72.50；这些只能作为外部参考，不是本 repo 跑出的结果 |
+| TreeSearch-node GraphRAG on GraphRAG-Bench | 未跑出正式结果 | 本 repo 尚无 GraphRAG-Bench dataset loader / adapter，不能把公开 leaderboard 写成 ours |
+| Required next output | 待实现 | `evaluation/graphrag_bench.py`，输出 official-compatible prediction rows，并调用 benchmark 原生 evaluator 得到 Accuracy / R / AR |
+
+论文写法：GraphRAG-Bench 当前只能写为 planned benchmark + external baseline reference；正式 claim 必须等本方法在同一 evaluator 上跑出结果后再写。
+
 第三层：代码仓库（证明代码定位能力）
 
 目标：用 RepoQA 和 CodeSearchNet 证明 TreeSearch seed 能精确定位函数/类/配置节点，并展示 TreeSearch-node guided GraphRAG 在代码问答上的 grounding 优势。
@@ -696,18 +706,33 @@ GraphRAG 消融 pilot：
 1. 已在 `examples/benchmark/codesearchnet_benchmark.py` 增加 `TreeSearchCodeGraphRAGIndex`。
 2. 已新增 CLI 参数 `--with-graphrag`，可在现有 CodeSearchNet benchmark 中增加 `treesearch_graphrag` 方法。
 3. 已新增 `tmp/codesearchnet_graphrag_smoke_demo.py`，用真实 TreeSearch indexing + TreeSearch-node GraphRAG 跑 synthetic CodeSearchNet path。
-4. 下一步是接入 RepoQA SNF 数据格式：将 needle function 描述作为 query，将 repository functions/classes 转成 TreeSearch code nodes，输出 function-level hit rate 与 BLEU/similarity-compatible result。
+4. 已补充 GraphRAG async query path，解决 CodeSearchNet async benchmark 中同步 GraphRAG seed retrieval 的 nested event loop 问题。
+5. 下一步是接入 RepoQA SNF 数据格式：将 needle function 描述作为 query，将 repository functions/classes 转成 TreeSearch code nodes，输出 function-level hit rate 与 BLEU/similarity-compatible result。
 
 CodeSearchNet 运行命令：
 
 ```bash
 python examples/benchmark/codesearchnet_benchmark.py \
   --language python \
-  --max-samples 50 \
-  --max-corpus 1000 \
+  --max-samples 20 \
+  --max-corpus 200 \
   --with-graphrag \
   --with-embedding
 ```
+
+CodeSearchNet 小样本结果（Python test，20 queries / 200 corpus，Zhipu `embedding-3`，2026-04-26）：
+
+| Method | MRR | Hit@1 | Recall@5 | Recall@10 | Avg query time (s) | Index time (s) |
+|---|---:|---:|---:|---:|---:|---:|
+| TreeSearch FTS5 | 0.885 | 0.850 | 0.950 | 0.950 | 0.0005 | 0.684 |
+| TreeSearch tree | 0.867 | 0.800 | 0.950 | 0.950 | 0.0027 | 0.684 |
+| TreeSearch auto | 0.885 | 0.850 | 0.950 | 0.950 | 0.0005 | 0.684 |
+| TreeSearch-node GraphRAG | 0.800 | 0.750 | 0.850 | 0.850 | 0.2717 | 0.684 |
+| Zhipu Dense | 0.900 | 0.800 | 1.000 | 1.000 | 0.1509 | 5.683 |
+
+同时跑通 synthetic smoke：`tmp/codesearchnet_graphrag_smoke_demo.py` 得到 MRR 1.000、Hit@1 1.000、Recall@2 1.000。解释：CodeSearchNet 小样本中 Dense 的 Recall@5/10 更强，TreeSearch FTS5/auto 的 Hit@1 更强且快约 300x；当前 lightweight code relation extractor 让 GraphRAG 低于 TreeSearch-only，因此这组结果更适合作为 runnable validation 和 error analysis，而不是最终主结果。
+
+RepoQA 当前结果状态：未跑出 500-test SNF 正式结果；缺 official data adapter、function candidate extraction、`repoqa.compute_score` 对接，以及 BLEU>0.8 的官方兼容评分输出。
 
 消融实验矩阵：
 
@@ -739,11 +764,12 @@ python examples/benchmark/codesearchnet_benchmark.py \
 
 正式 baseline 替换要求：
 
-1. `dense`：使用真实 embedding baseline，推荐 `text-embedding-3-small` 或 BGE-M3，缓存到 SQLite/FAISS。
+1. `dense`：使用真实 embedding baseline，推荐zhipu `embedding-3` 或 `text-embedding-3-small` 或 BGE-M3，缓存到 SQLite/FAISS。
 2. `hybrid`：FTS5/TreeSearch seed + dense rerank，不能再使用 lexical proxy。
-3. `Vector Graph RAG`：复用 `/Users/xuming/Documents/Codes/vector-graph-rag`，固定同一 LLM/embedding 配置。
+3. `Vector Graph RAG`：复用 [vector-graph-rag](https://github.com/xumingming/vector-graph-rag)，固定同一 LLM/embedding 配置。
 4. `IRCoT`：实现 2-3 step iterative retrieval，记录 LLM calls 和 latency。
 5. `LightRAG/HippoRAG`：至少接入一个公开实现作为 external baseline。
+6. `TreeSearch-node GraphRAG`：复用当前 repo，固定同一 LLM/embedding 配置。
 
 正式论文 claim 只有在上述实验完成后才能写成 strong claim；当前 pilot 只能写成 implementation validation。
 

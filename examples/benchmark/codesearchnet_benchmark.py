@@ -513,6 +513,19 @@ class TreeSearchCodeGraphRAGIndex:
 
     def search(self, query: str, top_k: int = 10) -> list[tuple[int, float]]:
         answer = self.rag.query(query)
+        output = self._rank_from_answer(answer, top_k)
+        if output:
+            return output
+        return TreeSearchCodeAutoIndex(self.base).search(query, top_k=top_k)
+
+    async def asearch(self, query: str, top_k: int = 10) -> list[tuple[int, float]]:
+        answer = await self.rag.aquery(query)
+        output = self._rank_from_answer(answer, top_k)
+        if output:
+            return output
+        return TreeSearchCodeAutoIndex(self.base).search(query, top_k=top_k)
+
+    def _rank_from_answer(self, answer, top_k: int) -> list[tuple[int, float]]:
         output = []
         seen_idx = set()
         for citation in answer.evidence_chain.citations:
@@ -523,9 +536,7 @@ class TreeSearchCodeGraphRAGIndex:
             output.append((idx, 1.0 / (len(output) + 1)))
             if len(output) >= top_k:
                 break
-        if output:
-            return output
-        return TreeSearchCodeAutoIndex(self.base).search(query, top_k=top_k)
+        return output
 
 
 def _code_identifiers(text: str, max_identifiers: int = 40) -> list[str]:
@@ -591,6 +602,48 @@ def evaluate_retrieval(
         )
 
     # Aggregate
+    avg_metrics = {}
+    if all_results:
+        for key in all_results[0]:
+            avg_metrics[key] = np.mean([r[key] for r in all_results])
+
+    avg_cost = aggregate_cost_stats(cost_stats)
+    avg_metrics["avg_query_time"] = avg_cost.latency_seconds
+    avg_metrics["total_queries"] = len(query_samples)
+
+    return avg_metrics
+
+
+async def aevaluate_retrieval(
+    query_samples: list[CodeSample],
+    index,
+    k_values: list[int] = None,
+) -> dict:
+    """Async retrieval evaluation for indexes that expose an async search API."""
+    if k_values is None:
+        k_values = [1, 3, 5, 10]
+
+    all_results = []
+    cost_stats = []
+
+    for sample in query_samples:
+        tracker = CostTracker()
+        with tracker:
+            results = await index.asearch(sample.query, top_k=max(k_values))
+
+        retrieved_ids = [idx for idx, _ in results]
+        relevant_ids = [sample.idx]
+        metrics = evaluate_query(retrieved_ids, relevant_ids, k_values)
+
+        all_results.append(metrics)
+        cost_stats.append(tracker.stats)
+
+        hit_str = "HIT" if sample.idx in retrieved_ids[:1] else "miss"
+        logger.info(
+            f"[{len(all_results)}/{len(query_samples)}] MRR={metrics['mrr']:.2f} "
+            f"P@1={metrics['precision@1']:.2f} [{hit_str}] {tracker.stats.latency_seconds:.3f}s"
+        )
+
     avg_metrics = {}
     if all_results:
         for key in all_results[0]:
@@ -688,7 +741,7 @@ async def main():
         print(f"{'=' * 60}")
 
         graph_index = TreeSearchCodeGraphRAGIndex(ts_index)
-        graph_metrics = evaluate_retrieval(query_samples, graph_index)
+        graph_metrics = await aevaluate_retrieval(query_samples, graph_index)
         graph_metrics["index_time"] = ts_index_time
         graph_metrics["num_nodes"] = ts_metrics["num_nodes"]
         results["treesearch_graphrag"] = graph_metrics
