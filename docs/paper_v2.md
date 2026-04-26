@@ -576,45 +576,50 @@ Pilot 观察：
 
 ### 表 5：Public multi-hop QA pilot 结果
 
-已将 `/Users/xuming/Documents/Codes/vector-graph-rag/evaluation` 整体复制到本 repo 根目录下的 `evaluation/`，并删除 GPT OpenIE cache 与 NER cache，仅保留公开 QA 的 question/corpus 数据。新的 `evaluation/evaluate.py` 是 TreeSearch-native retrieval runner，可直接对 HotpotQA、MuSiQue、2WikiMultiHopQA 和 `test_sample` 计算 supporting-passage Recall@K、Hit@K、MRR 和 latency。
+已将 `/Users/xuming/Documents/Codes/vector-graph-rag/evaluation` 整体复制到本 repo 根目录下的 `evaluation/`，并删除 GPT OpenIE cache 与 NER cache，仅保留公开 QA 的 question/corpus 数据。新的 `evaluation/evaluate.py` 是 TreeSearch-native public QA runner，可直接对 HotpotQA、MuSiQue、2WikiMultiHopQA 和 `test_sample` 计算 supporting-passage Recall@K、Hit@K、MRR、answer exact match、answer accuracy、answer F1 和 latency。
 
 运行命令：
 
 ```bash
-python evaluation/evaluate.py --dataset test_sample --max-samples 10
-python evaluation/evaluate.py --dataset hotpotqa --max-samples 50
-python evaluation/evaluate.py --dataset musique --max-samples 50
-python evaluation/evaluate.py --dataset 2wikimultihopqa --max-samples 50
+python evaluation/evaluate.py --dataset test_sample --max-samples 10 --embedding-cache-path output/zhipu_embeddings_test_sample.json
+python evaluation/evaluate.py --dataset hotpotqa --max-samples 50 --embedding-cache-path output/zhipu_embeddings_hotpotqa.json
+python evaluation/evaluate.py --dataset musique --max-samples 50 --embedding-cache-path output/zhipu_embeddings_musique.json
+python evaluation/evaluate.py --dataset 2wikimultihopqa --max-samples 50 --embedding-cache-path output/zhipu_embeddings_2wikimultihopqa.json
 ```
 
-50-query pilot 表：
+50-query pilot 表（dense 使用 Zhipu `embedding-3`，512 维，缓存到 `output/zhipu_embeddings_*.json`）：
 
-| Dataset | Method | Count | Recall@1 | Recall@5 | Recall@10 | MRR | Avg Latency |
-|---|---|---:|---:|---:|---:|---:|---:|
-| test_sample | TreeSearch | 10 | 0.150 | 0.600 | 1.000 | 0.368 | 0.002s |
-| test_sample | FTS5 BM25 | 10 | 0.550 | 0.550 | 0.550 | 1.000 | <0.001s |
-| test_sample | Dense lexical proxy | 10 | 0.400 | 0.900 | 1.000 | 0.900 | <0.001s |
-| test_sample | Hybrid lexical proxy | 10 | 0.250 | 0.850 | 1.000 | 0.592 | 0.002s |
-| HotpotQA | TreeSearch | 50 | 0.100 | 0.460 | 0.820 | 0.430 | 0.163s |
-| HotpotQA | FTS5 BM25 | 50 | 0.430 | 0.430 | 0.430 | 0.860 | 0.012s |
-| HotpotQA | Dense lexical proxy | 50 | 0.170 | 0.400 | 0.420 | 0.457 | 0.031s |
-| HotpotQA | Hybrid lexical proxy | 50 | 0.260 | 0.500 | 0.640 | 0.642 | 0.181s |
-| MuSiQue | TreeSearch | 50 | 0.132 | 0.415 | 0.455 | 0.479 | 0.228s |
-| MuSiQue | FTS5 BM25 | 50 | 0.240 | 0.240 | 0.240 | 0.600 | 0.018s |
-| MuSiQue | Dense lexical proxy | 50 | 0.083 | 0.175 | 0.202 | 0.234 | 0.039s |
-| MuSiQue | Hybrid lexical proxy | 50 | 0.145 | 0.367 | 0.448 | 0.465 | 0.245s |
-| 2WikiMultiHopQA | TreeSearch | 50 | 0.180 | 0.620 | 0.670 | 0.638 | 0.102s |
-| 2WikiMultiHopQA | FTS5 BM25 | 50 | 0.350 | 0.350 | 0.350 | 0.820 | 0.007s |
-| 2WikiMultiHopQA | Dense lexical proxy | 50 | 0.140 | 0.260 | 0.280 | 0.419 | 0.018s |
-| 2WikiMultiHopQA | Hybrid lexical proxy | 50 | 0.175 | 0.540 | 0.670 | 0.643 | 0.107s |
+| Dataset | Method | Count | Recall@1 | Recall@5 | Recall@10 | MRR | Acc | F1 | Avg Latency |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| test_sample | TreeSearch | 10 | 0.150 | 0.600 | 1.000 | 0.368 | 0.500 | 0.146 | 0.003s |
+| test_sample | FTS5 BM25 | 10 | 0.550 | 0.550 | 0.550 | 1.000 | 0.700 | 0.184 | <0.001s |
+| test_sample | Zhipu Dense | 10 | 0.100 | 0.350 | 0.600 | 0.259 | 0.300 | 0.087 | <0.001s |
+| test_sample | Hybrid | 10 | 0.200 | 0.450 | 0.850 | 0.444 | 0.400 | 0.109 | 0.002s |
+| test_sample | TreeSearch GraphRAG | 10 | 0.450 | 0.850 | 0.850 | 0.950 | 0.600 | 0.179 | 0.002s |
+| HotpotQA | TreeSearch | 50 | 0.100 | 0.460 | 0.820 | 0.430 | 0.140 | 0.055 | 0.172s |
+| HotpotQA | FTS5 BM25 | 50 | 0.430 | 0.430 | 0.430 | 0.860 | 0.200 | 0.060 | 0.013s |
+| HotpotQA | Zhipu Dense | 50 | 0.340 | 0.650 | 0.740 | 0.772 | 0.160 | 0.062 | 0.322s |
+| HotpotQA | Hybrid | 50 | 0.310 | 0.690 | 0.790 | 0.767 | 0.160 | 0.058 | 0.474s |
+| HotpotQA | TreeSearch GraphRAG | 50 | 0.280 | 0.510 | 0.510 | 0.700 | 0.160 | 0.052 | 0.166s |
+| MuSiQue | TreeSearch | 50 | 0.132 | 0.415 | 0.455 | 0.479 | 0.040 | 0.020 | 0.225s |
+| MuSiQue | FTS5 BM25 | 50 | 0.240 | 0.240 | 0.240 | 0.600 | 0.060 | 0.029 | 0.018s |
+| MuSiQue | Zhipu Dense | 50 | 0.248 | 0.480 | 0.553 | 0.703 | 0.060 | 0.024 | 1.836s |
+| MuSiQue | Hybrid | 50 | 0.280 | 0.495 | 0.573 | 0.742 | 0.080 | 0.025 | 0.609s |
+| MuSiQue | TreeSearch GraphRAG | 50 | 0.192 | 0.273 | 0.273 | 0.513 | 0.000 | 0.022 | 0.210s |
+| 2WikiMultiHopQA | TreeSearch | 50 | 0.180 | 0.620 | 0.670 | 0.638 | 0.140 | 0.065 | 0.104s |
+| 2WikiMultiHopQA | FTS5 BM25 | 50 | 0.350 | 0.350 | 0.350 | 0.820 | 0.180 | 0.061 | 0.007s |
+| 2WikiMultiHopQA | Zhipu Dense | 50 | 0.265 | 0.520 | 0.595 | 0.711 | 0.180 | 0.047 | 1.039s |
+| 2WikiMultiHopQA | Hybrid | 50 | 0.340 | 0.655 | 0.690 | 0.883 | 0.200 | 0.068 | 0.305s |
+| 2WikiMultiHopQA | TreeSearch GraphRAG | 50 | 0.335 | 0.400 | 0.400 | 0.813 | 0.160 | 0.063 | 0.104s |
 
 Public pilot 观察：
 
-1. 公开 QA 数据能验证 retrieval harness 与 metric 链路，但不是 TreeSearch-Guided GraphRAG 的最终主战场；它缺少代码、配置、文档树和 line grounding 等结构信号。
-2. TreeSearch 在 HotpotQA 和 2Wiki 的 Recall@10 明显高于直接 FTS5 与 lexical dense proxy，说明结构化 route + global merge 在 multi-hop supporting passage recall 上有价值。
-3. 当前 `dense` 仍是无外部依赖 lexical proxy，不代表正式 dense retriever；正式实验必须替换为 BGE-M3/OpenAI embedding，并加入 Vector Graph RAG、IRCoT、HippoRAG/LightRAG。
-4. FTS5 BM25 的 Recall@K 在 K 增大时不明显提升，原因是直接 BM25 top candidates 往往集中在第一跳强匹配实体；这反而强化了 public benchmark 中“需要跨实体扩展”的实验动机。
-5. 下一步要把 copied evaluation 的公开数据接入 GraphRAG relation extractor/LLM extractor，跑 `Ours`、Vector Graph RAG 和 IRCoT 的同设置对照，否则表 1 仍只是 retrieval pilot。
+1. 不能写成“TreeSearch 在 50-query public QA 上全面最优”。更准确的结论是：TreeSearch 在 HotpotQA 和 2Wiki 的 Recall@10 很强，FTS5 在 Recall@1/MRR 上常常更强，Zhipu Dense 在 MuSiQue/HotpotQA 的 Recall@5/10 明显补足 sparse retrieval。
+2. Hybrid 的意义已经从真实 embedding 结果中体现出来：HotpotQA Recall@5 从 TreeSearch 0.460 提升到 0.690，MuSiQue Recall@10 从 0.455 提升到 0.573，2Wiki Recall@10 从 0.670 提升到 0.690，同时 2Wiki MRR 达到 0.883。
+3. 当前 public-QA GraphRAG 使用轻量 title/entity triplet extractor，已经能作为 GraphRAG 路径 smoke，但还不是最终 `Ours`。它在 `test_sample` 和 2Wiki 的 Recall@1/MRR 较强，但在 HotpotQA/MuSiQue 的 Recall@10 不如 Hybrid，说明 public QA 上需要更强 OpenIE/LLM triplet extraction 或复用 Vector Graph RAG 的预抽取 triplets。
+4. Answer Acc/F1 当前是 retrieval-conditioned extractive proxy：从 retrieved passages 中选一句最相关 evidence sentence 与 gold answer 比较。它可以暴露“检索到 supporting passage 但答案句不一定排在最前”的问题，但不能替代正式生成式 QA F1。
+5. 公开 QA 数据能验证通用 multi-hop retrieval，但不是 TreeSearch-Guided GraphRAG 的最终主战场；它缺少代码、配置、文档树和 line grounding 等结构信号。论文强 claim 仍应放在 RealRepoBench-main，public QA 作为与 GraphRAG 文献对齐的补充实验。
+6. 下一步要接入 Vector Graph RAG/HippoRAG 预抽取 triplets、IRCoT 和生成式 answer LLM，形成正式 Table 1；当前表可写成 engineering pilot / early evidence，不应直接写成最终 SOTA claim。
 
 ### 表 6：正式实验执行矩阵
 
