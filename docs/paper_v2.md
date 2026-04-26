@@ -665,12 +665,19 @@ GraphRAG 消融 pilot：
 
 必须包含：
 
-1. Dataset：GraphRAG-Bench。
-2. Methods：GraphRAG-Bench 原始 9 个 GraphRAG baselines + TreeSearch-node GraphRAG。
+1. Dataset：GraphRAG-Bench（官方仓库：[GraphRAG-Bench/GraphRAG-Benchmark](https://github.com/GraphRAG-Bench/GraphRAG-Benchmark)，论文：[arXiv:2506.02404](https://arxiv.org/abs/2506.02404)）。
+2. Methods：GraphRAG-Bench 原始 9 个 GraphRAG baselines + TreeSearch-node GraphRAG。公开资料中的代表方法包括 RAPTOR、KGP、LightRAG、Microsoft GraphRAG、HippoRAG、GFM-RAG、ToG 等。
 3. Metrics：benchmark 原生 answer correctness / faithfulness / evidence retrieval 指标，以及 LLM calls、latency、cost。
 4. Table：GraphRAG 专项主表，作为论文表 2 或附录主表。
 
 局限：GraphRAG-Bench 不含代码仓库结构、函数定位、配置文件和 line grounding，所以只能证明 GraphRAG 能力，不能证明 TreeSearch 的核心结构优势。
+
+接入策略：
+
+1. 先实现 GraphRAG-Bench adapter，将每本 textbook / section 转成 TreeSearch documents。
+2. 用 TreeSearch structural node 作为 GraphRAG passage，而不是 arbitrary chunk。
+3. 保留 benchmark 原生 judge/evaluation，不改指标，避免被审稿人认为自定义评测偏置。
+4. 与原始 9 个 baselines 的公开结果对齐，不必一开始全部本地复现。
 
 第三层：代码仓库（证明代码定位能力）
 
@@ -678,11 +685,29 @@ GraphRAG 消融 pilot：
 
 必须包含：
 
-1. RepoQA：500 tests，主打 repository-level QA / function localization。
+1. RepoQA：500 tests，主打 repository-level QA / function localization。官方信息：[RepoQA homepage](https://evalplus.github.io/repoqa.html)，官方仓库：[evalplus/repoqa](https://github.com/evalplus/repoqa)。
 2. CodeSearchNet：代码检索基线，主打 natural language query -> function retrieval。
 3. Methods：FTS5、Zhipu Dense、Hybrid、TreeSearch auto/tree/flat、TreeSearch-node GraphRAG。
 4. Metrics：MRR、Recall@1/5/10、function hit rate、source path accuracy、line accuracy、answer EM/F1。
 5. Role：补充实验，不主推；主推仍然是 RealRepoBench-main 的异构仓库结构与 grounding。
+
+当前代码状态：
+
+1. 已在 `examples/benchmark/codesearchnet_benchmark.py` 增加 `TreeSearchCodeGraphRAGIndex`。
+2. 已新增 CLI 参数 `--with-graphrag`，可在现有 CodeSearchNet benchmark 中增加 `treesearch_graphrag` 方法。
+3. 已新增 `tmp/codesearchnet_graphrag_smoke_demo.py`，用真实 TreeSearch indexing + TreeSearch-node GraphRAG 跑 synthetic CodeSearchNet path。
+4. 下一步是接入 RepoQA SNF 数据格式：将 needle function 描述作为 query，将 repository functions/classes 转成 TreeSearch code nodes，输出 function-level hit rate 与 BLEU/similarity-compatible result。
+
+CodeSearchNet 运行命令：
+
+```bash
+python examples/benchmark/codesearchnet_benchmark.py \
+  --language python \
+  --max-samples 50 \
+  --max-corpus 1000 \
+  --with-graphrag \
+  --with-embedding
+```
 
 消融实验矩阵：
 
