@@ -1,0 +1,12 @@
+{
+  "config::2c0bc2b09fcec479": [
+    ["max_concurrency", "defined_in", "TreeSearchConfig"],
+    ["cjk_tokenizer", "defined_in", "TreeSearchConfig"]
+  ],
+  "runtime::f17e5b4daf4c154b": [
+    ["TreeSearchConfig", "documented_in", "Runtime Settings"]
+  ],
+  "cli::aba57ea08154375b": [
+    ["treesearch", "documented_in", "CLI Usage"]
+  ]
+}

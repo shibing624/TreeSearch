@@ -4,12 +4,16 @@
 from treesearch import TreeSearch
 from treesearch.tree import Document
 from treesearch.rag import TreeSearchGraphRAG
+from treesearch.rag.answer import LLMAnswerGenerator
 from treesearch.rag.extractors import PreExtractedTripletExtractor, RuleBasedTripletExtractor
+from treesearch.rag.evidence import LLMEvidenceSelector
 from treesearch.rag.expansion import ExpansionConfig, StructureConstrainedExpander
 from treesearch.rag.graph_builder import NodeGraphBuilder
 from treesearch.rag.graph_store import InMemoryGraphStore
+from treesearch.rag.llm import FakeLLMClient
 from treesearch.rag.models import EvidenceChain, EvidenceCitation, GraphSeed, make_graph_node_id
 from treesearch.rag.node_graph import document_to_node_passages, document_to_structural_edges
+from treesearch.rag.sqlite_graph_store import SQLiteGraphStore
 from treesearch.rag.verifier import EvidenceVerifier
 
 
@@ -243,3 +247,98 @@ def test_pipeline_exposes_stats_and_retrieval_only_chain():
     assert stats["relations"] == 2
     assert chain.evidence_sufficiency
     assert "max_concurrency defined_in TreeSearchConfig" in chain.reasoning_chain
+
+
+def test_sqlite_graph_store_saves_and_loads_reusable_graph(tmp_path):
+    db_path = tmp_path / "graph.db"
+    store = SQLiteGraphStore(db_path)
+    stats = NodeGraphBuilder(extractor=RuleBasedTripletExtractor(), store=store).build(_repo_docs())
+    store.save()
+
+    loaded = SQLiteGraphStore(db_path)
+    loaded.load()
+
+    assert stats.relations == 2
+    assert loaded.stats()["passages"] == 3
+    assert loaded.stats()["relations"] == 2
+    assert loaded.get_passage("code", "cfg-class").source_path == "treesearch/config.py"
+    assert loaded.get_relations_by_node("code", "cfg-class")[0].text == "max_concurrency defined_in TreeSearchConfig"
+
+
+def test_pipeline_can_use_loaded_sqlite_graph_store(tmp_path):
+    db_path = tmp_path / "graph.db"
+    ts = TreeSearch(db_path=None)
+    docs = _repo_docs()
+    docs[0].structure[0]["nodes"][0]["text"] = "This node has no rule-extractable relation."
+    ts.documents = docs
+    store = SQLiteGraphStore(db_path)
+    extractor = PreExtractedTripletExtractor(
+        {
+            make_graph_node_id("code", "cfg-class"): [
+                ("max_concurrency", "defined_in", "TreeSearchConfig"),
+            ]
+        }
+    )
+    rag = TreeSearchGraphRAG.from_tree_search(ts, extractor=extractor, store=store)
+    rag.build_graph()
+    store.save()
+
+    loaded_store = SQLiteGraphStore(db_path)
+    loaded_store.load()
+    loaded_rag = TreeSearchGraphRAG.from_tree_search(ts, store=loaded_store)
+    answer = loaded_rag.query("max_concurrency TreeSearchConfig Runtime Settings")
+
+    assert answer.verification.ok
+    assert "max_concurrency defined_in TreeSearchConfig" in answer.answer
+
+
+def test_llm_selector_and_answer_generator_use_real_interfaces_with_fake_client():
+    store = InMemoryGraphStore()
+    NodeGraphBuilder(extractor=RuleBasedTripletExtractor(), store=store).build(_repo_docs())
+    expander = StructureConstrainedExpander(store, ExpansionConfig(max_relations=5))
+    candidates = expander.expand(
+        "max_concurrency TreeSearchConfig Runtime Settings",
+        seeds=[GraphSeed(node_id="cfg-class", doc_id="code", score=1.0, source="tree")],
+    )
+    selected_id = candidates[0].relation.relation_id
+    selector_client = FakeLLMClient(response=f'{{"selected_relation_ids": ["{selected_id}"]}}')
+    selector = LLMEvidenceSelector(selector_client, top_k=1)
+
+    chain = selector.select("max_concurrency TreeSearchConfig Runtime Settings", candidates, store)
+    answer = LLMAnswerGenerator(FakeLLMClient(response="max_concurrency is defined in TreeSearchConfig.")).generate(
+        "max_concurrency TreeSearchConfig Runtime Settings",
+        chain,
+        EvidenceVerifier(store).verify(chain),
+    )
+
+    assert chain.selected_relation_ids == (selected_id,)
+    assert answer.answer == "max_concurrency is defined in TreeSearchConfig."
+    assert selector_client.calls
+
+
+def test_pipeline_use_llm_runs_selector_and_answer_with_fake_client():
+    ts = TreeSearch(db_path=None)
+    ts.documents = _repo_docs()
+    selected_id = next(
+        relation.relation_id
+        for relation in RuleBasedTripletExtractor().extract(document_to_node_passages(_repo_docs()[0])[1])
+    )
+    llm_client = FakeLLMClient(
+        response=[
+            f'{{"selected_relation_ids": ["{selected_id}"]}}',
+            "max_concurrency is defined in TreeSearchConfig.",
+        ]
+    )
+    rag = TreeSearchGraphRAG.from_tree_search(
+        ts,
+        extractor=RuleBasedTripletExtractor(),
+        expansion_config=ExpansionConfig(max_relations=5),
+        use_llm=True,
+        llm_client=llm_client,
+    )
+
+    answer = rag.query("max_concurrency TreeSearchConfig Runtime Settings")
+
+    assert answer.verification.ok
+    assert answer.answer == "max_concurrency is defined in TreeSearchConfig."
+    assert len(llm_client.calls) == 2

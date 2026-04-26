@@ -32,6 +32,14 @@ class InMemoryGraphStore:
         self.entity_to_relation_ids.clear()
         self.structural_edges.clear()
 
+    def stats(self) -> dict[str, int]:
+        return {
+            "passages": len(self.passages),
+            "entities": len(self.entities),
+            "relations": len(self.relations),
+            "structural_edges": len(self.structural_edges),
+        }
+
     def add_passages(self, passages: list[GraphNodePassage]) -> None:
         for passage in passages:
             self.passages[passage.graph_node_id] = passage

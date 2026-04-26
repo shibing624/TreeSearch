@@ -69,9 +69,9 @@ def evaluate_grounded_answer(sample: RealRepoSample, answer: GroundedAnswer) -> 
     gold_source_paths = set(sample.gold_source_paths)
 
     node_recall = _recall(gold_node_ids, selected_node_ids | citation_node_ids)
-    source_path_recall = _recall(gold_source_paths, citation_paths)
-    citation_precision = _precision(citation_paths, gold_source_paths)
-    citation_recall = _recall(gold_source_paths, citation_paths)
+    source_path_recall = _path_recall(gold_source_paths, citation_paths)
+    citation_precision = _path_precision(citation_paths, gold_source_paths)
+    citation_recall = _path_recall(gold_source_paths, citation_paths)
     line_grounding_accuracy = _line_grounding_accuracy(sample, answer)
     verification_ok = answer.verification.ok
     line_grounding_ok = not sample.needs_line_grounding or line_grounding_accuracy == 1.0
@@ -101,6 +101,35 @@ def _precision(predicted: set[str], gold: set[str]) -> float:
     if not predicted:
         return 0.0
     return len(predicted & gold) / len(predicted)
+
+
+def _path_recall(gold: set[str], predicted: set[str]) -> float:
+    if not gold:
+        return 1.0
+    matched = sum(1 for gold_path in gold if _path_in(gold_path, predicted))
+    return matched / len(gold)
+
+
+def _path_precision(predicted: set[str], gold: set[str]) -> float:
+    if not gold:
+        return 1.0
+    if not predicted:
+        return 0.0
+    matched = sum(1 for predicted_path in predicted if _path_in(predicted_path, gold))
+    return matched / len(predicted)
+
+
+def _path_in(path: str, candidates: set[str]) -> bool:
+    normalized_path = path.replace("\\", "/")
+    for candidate in candidates:
+        normalized_candidate = candidate.replace("\\", "/")
+        if (
+            normalized_candidate == normalized_path
+            or normalized_candidate.endswith(normalized_path)
+            or normalized_path.endswith(normalized_candidate)
+        ):
+            return True
+    return False
 
 
 def _line_grounding_accuracy(sample: RealRepoSample, answer: GroundedAnswer) -> float:

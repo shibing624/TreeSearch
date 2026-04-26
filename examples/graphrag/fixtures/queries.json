@@ -1,0 +1,29 @@
+[
+  {
+    "query_id": "cross_code_doc",
+    "query": "max_concurrency TreeSearchConfig Runtime Settings",
+    "gold_node_ids": ["config::2c0bc2b09fcec479", "runtime::f17e5b4daf4c154b"],
+    "gold_source_paths": ["treesearch/config.py", "docs/runtime.md"],
+    "query_type": "code_doc",
+    "requires_cross_source": true,
+    "needs_line_grounding": true
+  },
+  {
+    "query_id": "single_config",
+    "query": "cjk_tokenizer TreeSearchConfig",
+    "gold_node_ids": ["config::2c0bc2b09fcec479"],
+    "gold_source_paths": ["treesearch/config.py"],
+    "query_type": "single_source_config",
+    "requires_cross_source": false,
+    "needs_line_grounding": true
+  },
+  {
+    "query_id": "cli_doc",
+    "query": "treesearch CLI Usage index command",
+    "gold_node_ids": ["cli::aba57ea08154375b"],
+    "gold_source_paths": ["docs/cli.md"],
+    "query_type": "single_source_doc",
+    "requires_cross_source": false,
+    "needs_line_grounding": true
+  }
+]

@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """Evidence-chain selection for GraphRAG."""
 
+import json
 from typing import Protocol
 
 from treesearch.rag.graph_store import InMemoryGraphStore
+from treesearch.rag.llm import LLMClient, OpenAIChatClient
 from treesearch.rag.models import CandidateRelation, EvidenceChain, EvidenceCitation
 
 
@@ -66,3 +68,63 @@ class HeuristicEvidenceSelector:
             citations=tuple(citations),
             evidence_sufficiency=bool(selected),
         )
+
+
+class LLMEvidenceSelector:
+    """Select evidence relations with an OpenAI-compatible LLM."""
+
+    def __init__(self, llm_client: LLMClient | None = None, top_k: int = 5, model: str | None = None):
+        self.llm_client = llm_client or OpenAIChatClient()
+        self.top_k = top_k
+        self.model = model
+
+    def select(
+        self,
+        query: str,
+        candidates: list[CandidateRelation],
+        store: InMemoryGraphStore,
+    ) -> EvidenceChain:
+        if not candidates:
+            return HeuristicEvidenceSelector(top_k=self.top_k).select(query, candidates, store)
+
+        candidate_rows = [
+            {
+                "relation_id": candidate.relation.relation_id,
+                "relation": candidate.relation.text,
+                "score": candidate.total_score,
+            }
+            for candidate in candidates[: max(self.top_k * 4, self.top_k)]
+        ]
+        response = self.llm_client.chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Select the smallest useful set of relation_id values for a grounded answer. "
+                        "Return strict JSON: {\"selected_relation_ids\": [\"...\"]}."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps({"query": query, "candidates": candidate_rows}, ensure_ascii=False),
+                },
+            ],
+            model=self.model,
+        )
+        data = json.loads(_extract_json_object(response))
+        selected_ids = set(str(relation_id) for relation_id in data["selected_relation_ids"])
+        selected_candidates = [candidate for candidate in candidates if candidate.relation.relation_id in selected_ids]
+        selected_candidates = selected_candidates[: self.top_k]
+        return HeuristicEvidenceSelector(top_k=self.top_k).select(query, selected_candidates, store)
+
+
+def _extract_json_object(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = [line for line in stripped.splitlines() if not line.strip().startswith("```")]
+        stripped = "\n".join(lines).strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return stripped
+    start = stripped.index("{")
+    end = stripped.rindex("}") + 1
+    return stripped[start:end]

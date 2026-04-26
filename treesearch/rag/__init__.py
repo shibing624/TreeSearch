@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Optional TreeSearch-guided GraphRAG layer."""
 
-from treesearch.rag.answer import TemplateAnswerGenerator
-from treesearch.rag.evidence import EvidenceSelector, HeuristicEvidenceSelector
+from treesearch.rag.answer import LLMAnswerGenerator, TemplateAnswerGenerator
+from treesearch.rag.evidence import EvidenceSelector, HeuristicEvidenceSelector, LLMEvidenceSelector
 from treesearch.rag.eval import (
     RealRepoEvalResult,
     RealRepoSample,
@@ -17,6 +17,7 @@ from treesearch.rag.extractors import (
 )
 from treesearch.rag.graph_builder import NodeGraphBuilder
 from treesearch.rag.graph_store import InMemoryGraphStore
+from treesearch.rag.llm import FakeLLMClient, LLMClient, OpenAIChatClient
 from treesearch.rag.models import (
     CandidateRelation,
     EvidenceChain,
@@ -32,6 +33,7 @@ from treesearch.rag.models import (
     VerificationResult,
 )
 from treesearch.rag.pipeline import TreeSearchGraphRAG
+from treesearch.rag.sqlite_graph_store import SQLiteGraphStore
 
 __all__ = [
     "CandidateRelation",
@@ -39,6 +41,7 @@ __all__ = [
     "EvidenceCitation",
     "EvidenceSelector",
     "ExpansionConfig",
+    "FakeLLMClient",
     "GraphBuildStats",
     "GraphEntity",
     "GraphNodePassage",
@@ -47,11 +50,16 @@ __all__ = [
     "GroundedAnswer",
     "HeuristicEvidenceSelector",
     "InMemoryGraphStore",
+    "LLMAnswerGenerator",
+    "LLMClient",
+    "LLMEvidenceSelector",
     "NodeGraphBuilder",
+    "OpenAIChatClient",
     "PreExtractedTripletExtractor",
     "RealRepoEvalResult",
     "RealRepoSample",
     "RuleBasedTripletExtractor",
+    "SQLiteGraphStore",
     "StructuralEdge",
     "StructureConstrainedExpander",
     "TemplateAnswerGenerator",
