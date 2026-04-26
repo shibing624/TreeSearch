@@ -9,6 +9,8 @@ from typing import Protocol
 
 
 class LLMClient(Protocol):
+    call_count: int
+
     def chat(self, messages: list[dict[str, str]], model: str | None = None) -> str:
         ...
 
@@ -19,9 +21,11 @@ class FakeLLMClient:
     def __init__(self, response: str | list[str]):
         self.response = response
         self.calls: list[dict] = []
+        self.call_count = 0
 
     def chat(self, messages: list[dict[str, str]], model: str | None = None) -> str:
         self.calls.append({"messages": messages, "model": model})
+        self.call_count += 1
         if isinstance(self.response, list):
             index = len(self.calls) - 1
             return self.response[index]
@@ -48,8 +52,10 @@ class OpenAIChatClient:
             or "https://api.openai.com/v1"
         ).rstrip("/")
         self.model = model or env.get("OPENAI_MODEL") or env.get("OPENAI_API_MODEL") or "gpt-4o-mini"
+        self.call_count = 0
 
     def chat(self, messages: list[dict[str, str]], model: str | None = None) -> str:
+        self.call_count += 1
         payload = {
             "model": model or self.model,
             "messages": messages,

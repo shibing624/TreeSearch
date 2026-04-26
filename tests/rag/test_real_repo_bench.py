@@ -28,7 +28,11 @@ def test_real_repo_bench_runs_graph_and_treesearch_baselines(tmp_path):
     assert "treesearch" in report["summary"]
     assert report["summary"]["graphrag"]["count"] == 3
     assert report["summary"]["treesearch"]["count"] == 3
+    assert report["summary"]["graphrag"]["latency_seconds"] >= 0.0
+    assert report["summary"]["graphrag"]["avg_latency_seconds"] >= 0.0
+    assert report["summary"]["graphrag"]["llm_calls"] == 0
     assert "| method | count | node_recall |" in markdown_path.read_text(encoding="utf-8")
+    assert "latency_seconds" in markdown_path.read_text(encoding="utf-8")
 
 
 def test_real_repo_bench_defaults_work_outside_repo_root(tmp_path, monkeypatch):

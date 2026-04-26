@@ -14,6 +14,7 @@ Example:
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,7 @@ from treesearch.rag import (
     evaluate_grounded_answer,
 )
 from treesearch.rag.models import make_graph_node_id
+from treesearch.rag.llm import LLMClient, OpenAIChatClient
 from treesearch.rag.sqlite_graph_store import SQLiteGraphStore
 from treesearch.tree import Document
 
@@ -91,7 +93,7 @@ def run(
     method_results = {}
 
     if baseline in {"both", "graphrag"}:
-        graph_rows, graph_metrics, build_stats = _run_graphrag(
+        graph_rows, graph_metrics, build_stats, graph_runtime = _run_graphrag(
             ts=ts,
             samples=samples,
             triplets_path=triplets_path,
@@ -101,12 +103,12 @@ def run(
             llm_model=llm_model,
         )
         report["build_stats"]["graphrag"] = build_stats
-        report["summary"]["graphrag"] = aggregate_eval_results(graph_metrics)
+        report["summary"]["graphrag"] = _with_runtime_summary(graph_metrics, graph_runtime)
         method_results["graphrag"] = graph_rows
 
     if baseline in {"both", "treesearch"}:
-        tree_rows, tree_metrics = _run_treesearch_baseline(ts, samples)
-        report["summary"]["treesearch"] = aggregate_eval_results(tree_metrics)
+        tree_rows, tree_metrics, tree_runtime = _run_treesearch_baseline(ts, samples)
+        report["summary"]["treesearch"] = _with_runtime_summary(tree_metrics, tree_runtime)
         method_results["treesearch"] = tree_rows
 
     report["results"] = method_results
@@ -127,12 +129,13 @@ def _run_graphrag(
     graph_store_path: Optional[Path],
     use_llm: bool,
     llm_model: Optional[str],
-) -> tuple[list[dict], list, dict]:
+) -> tuple[list[dict], list, dict, dict]:
     extractor = (
         PreExtractedTripletExtractor(_load_triplets(triplets_path))
         if triplets_path is not None
         else RuleBasedTripletExtractor()
     )
+    llm_client = OpenAIChatClient(model=llm_model) if use_llm else None
     store = SQLiteGraphStore(graph_store_path or Path("tmp/graphrag_store.db")) if graph_store == "sqlite" else None
     rag = TreeSearchGraphRAG.from_tree_search(
         ts,
@@ -140,8 +143,10 @@ def _run_graphrag(
         expansion_config=ExpansionConfig(max_relations=50),
         store=store,
         use_llm=use_llm,
+        llm_client=llm_client,
         llm_model=llm_model,
     )
+    started = time.perf_counter()
     build_stats = rag.build_graph()
     if isinstance(store, SQLiteGraphStore):
         store.save()
@@ -153,15 +158,17 @@ def _run_graphrag(
         result = evaluate_grounded_answer(sample, answer)
         metrics.append(result)
         rows.append(_answer_row("graphrag", sample, answer, result))
+    runtime = _runtime_summary(started, len(samples), llm_client)
     return rows, metrics, {
         "documents": build_stats.documents,
         "passages": build_stats.passages,
         "relations": build_stats.relations,
         "structural_edges": build_stats.structural_edges,
-    }
+    }, runtime
 
 
-def _run_treesearch_baseline(ts: TreeSearch, samples: list[RealRepoSample]) -> tuple[list[dict], list]:
+def _run_treesearch_baseline(ts: TreeSearch, samples: list[RealRepoSample]) -> tuple[list[dict], list, dict]:
+    started = time.perf_counter()
     rows = []
     metrics = []
     doc_map = {document.doc_id: document for document in ts.documents}
@@ -177,7 +184,22 @@ def _run_treesearch_baseline(ts: TreeSearch, samples: list[RealRepoSample]) -> t
         eval_result = evaluate_grounded_answer(sample, answer)
         metrics.append(eval_result)
         rows.append(_answer_row("treesearch", sample, answer, eval_result))
-    return rows, metrics
+    return rows, metrics, _runtime_summary(started, len(samples), None)
+
+
+def _with_runtime_summary(metrics: list, runtime: dict) -> dict:
+    summary = aggregate_eval_results(metrics)
+    summary.update(runtime)
+    return summary
+
+
+def _runtime_summary(started: float, sample_count: int, llm_client: LLMClient | None) -> dict:
+    latency = time.perf_counter() - started
+    return {
+        "latency_seconds": latency,
+        "avg_latency_seconds": latency / sample_count if sample_count else 0.0,
+        "llm_calls": llm_client.call_count if llm_client is not None else 0,
+    }
 
 
 def _treesearch_result_to_answer(query: str, result: dict, doc_map: dict[str, Document]) -> GroundedAnswer:
@@ -250,14 +272,17 @@ def _format_markdown_summary(report: dict) -> str:
     lines = [
         "# GraphRAG RealRepoBench Summary",
         "",
-        "| method | count | node_recall | source_path_recall | citation_precision | citation_recall | line_grounding_accuracy | task_success_rate |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| method | count | node_recall | source_path_recall | citation_precision | citation_recall | line_grounding_accuracy | task_success_rate | latency_seconds | avg_latency_seconds | llm_calls |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for method, summary in report["summary"].items():
         lines.append(
             "| {method} | {count} | {node_recall:.3f} | {source_path_recall:.3f} | "
             "{citation_precision:.3f} | {citation_recall:.3f} | {line_grounding_accuracy:.3f} | "
-            "{task_success_rate:.3f} |".format(method=method, **summary)
+            "{task_success_rate:.3f} | {latency_seconds:.3f} | {avg_latency_seconds:.3f} | {llm_calls} |".format(
+                method=method,
+                **summary,
+            )
         )
     lines.append("")
     return "\n".join(lines)
