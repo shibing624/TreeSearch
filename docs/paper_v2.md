@@ -574,7 +574,49 @@ Pilot 观察：
 3. 当前 `dense` 和 `hybrid` 是无外部依赖的 lexical proxy，只用于 harness smoke；正式论文必须替换为 OpenAI/BGE embedding + FAISS 或 SQLite vector cache。
 4. 这个 pilot 已验证 JSON、Markdown、LaTeX 表格链路、SQLite graph store、真实 LLM API、line grounding metrics 和 baseline adapter 能跑通。
 
-### 表 5：正式实验执行矩阵
+### 表 5：Public multi-hop QA pilot 结果
+
+已将 `/Users/xuming/Documents/Codes/vector-graph-rag/evaluation` 整体复制到本 repo 根目录下的 `evaluation/`，并删除 GPT OpenIE cache 与 NER cache，仅保留公开 QA 的 question/corpus 数据。新的 `evaluation/evaluate.py` 是 TreeSearch-native retrieval runner，可直接对 HotpotQA、MuSiQue、2WikiMultiHopQA 和 `test_sample` 计算 supporting-passage Recall@K、Hit@K、MRR 和 latency。
+
+运行命令：
+
+```bash
+python evaluation/evaluate.py --dataset test_sample --max-samples 10
+python evaluation/evaluate.py --dataset hotpotqa --max-samples 50
+python evaluation/evaluate.py --dataset musique --max-samples 50
+python evaluation/evaluate.py --dataset 2wikimultihopqa --max-samples 50
+```
+
+50-query pilot 表：
+
+| Dataset | Method | Count | Recall@1 | Recall@5 | Recall@10 | MRR | Avg Latency |
+|---|---|---:|---:|---:|---:|---:|---:|
+| test_sample | TreeSearch | 10 | 0.150 | 0.600 | 1.000 | 0.368 | 0.002s |
+| test_sample | FTS5 BM25 | 10 | 0.550 | 0.550 | 0.550 | 1.000 | <0.001s |
+| test_sample | Dense lexical proxy | 10 | 0.400 | 0.900 | 1.000 | 0.900 | <0.001s |
+| test_sample | Hybrid lexical proxy | 10 | 0.250 | 0.850 | 1.000 | 0.592 | 0.002s |
+| HotpotQA | TreeSearch | 50 | 0.100 | 0.460 | 0.820 | 0.430 | 0.163s |
+| HotpotQA | FTS5 BM25 | 50 | 0.430 | 0.430 | 0.430 | 0.860 | 0.012s |
+| HotpotQA | Dense lexical proxy | 50 | 0.170 | 0.400 | 0.420 | 0.457 | 0.031s |
+| HotpotQA | Hybrid lexical proxy | 50 | 0.260 | 0.500 | 0.640 | 0.642 | 0.181s |
+| MuSiQue | TreeSearch | 50 | 0.132 | 0.415 | 0.455 | 0.479 | 0.228s |
+| MuSiQue | FTS5 BM25 | 50 | 0.240 | 0.240 | 0.240 | 0.600 | 0.018s |
+| MuSiQue | Dense lexical proxy | 50 | 0.083 | 0.175 | 0.202 | 0.234 | 0.039s |
+| MuSiQue | Hybrid lexical proxy | 50 | 0.145 | 0.367 | 0.448 | 0.465 | 0.245s |
+| 2WikiMultiHopQA | TreeSearch | 50 | 0.180 | 0.620 | 0.670 | 0.638 | 0.102s |
+| 2WikiMultiHopQA | FTS5 BM25 | 50 | 0.350 | 0.350 | 0.350 | 0.820 | 0.007s |
+| 2WikiMultiHopQA | Dense lexical proxy | 50 | 0.140 | 0.260 | 0.280 | 0.419 | 0.018s |
+| 2WikiMultiHopQA | Hybrid lexical proxy | 50 | 0.175 | 0.540 | 0.670 | 0.643 | 0.107s |
+
+Public pilot 观察：
+
+1. 公开 QA 数据能验证 retrieval harness 与 metric 链路，但不是 TreeSearch-Guided GraphRAG 的最终主战场；它缺少代码、配置、文档树和 line grounding 等结构信号。
+2. TreeSearch 在 HotpotQA 和 2Wiki 的 Recall@10 明显高于直接 FTS5 与 lexical dense proxy，说明结构化 route + global merge 在 multi-hop supporting passage recall 上有价值。
+3. 当前 `dense` 仍是无外部依赖 lexical proxy，不代表正式 dense retriever；正式实验必须替换为 BGE-M3/OpenAI embedding，并加入 Vector Graph RAG、IRCoT、HippoRAG/LightRAG。
+4. FTS5 BM25 的 Recall@K 在 K 增大时不明显提升，原因是直接 BM25 top candidates 往往集中在第一跳强匹配实体；这反而强化了 public benchmark 中“需要跨实体扩展”的实验动机。
+5. 下一步要把 copied evaluation 的公开数据接入 GraphRAG relation extractor/LLM extractor，跑 `Ours`、Vector Graph RAG 和 IRCoT 的同设置对照，否则表 1 仍只是 retrieval pilot。
+
+### 表 6：正式实验执行矩阵
 
 为了达到可投稿标准，最终实验必须分三层：
 
