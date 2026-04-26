@@ -249,3 +249,4 @@ PERFORMANCE_SUMMARY.txt
 .claude/
 tmp/
 output/
+.DS_Store
