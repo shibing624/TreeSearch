@@ -54,6 +54,25 @@ def test_evaluate_public_qa_returns_method_summaries(tmp_path):
     assert (tmp_path / "results.md").exists()
 
 
+def test_public_qa_reports_graphrag_ablation_methods(tmp_path):
+    report = evaluate_public_qa(
+        dataset_name="test_sample",
+        data_dir=Path("evaluation/data"),
+        methods=("graphrag", "graphrag_no_structure", "graphrag_no_entity"),
+        max_samples=3,
+        output_path=tmp_path / "results.json",
+        markdown_path=tmp_path / "results.md",
+    )
+
+    assert set(report["summary"]) == {"graphrag", "graphrag_no_structure", "graphrag_no_entity"}
+    assert report["ablation_groups"]["public_graphrag"] == [
+        "graphrag",
+        "graphrag_no_structure",
+        "graphrag_no_entity",
+    ]
+    assert report["summary"]["graphrag_no_structure"]["count"] == 3
+
+
 def test_answer_metrics_include_exact_match_accuracy_and_token_f1():
     metrics = answer_metrics(
         gold_answer="1905",

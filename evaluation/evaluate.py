@@ -28,7 +28,9 @@ from treesearch.rag.models import GraphNodePassage, GraphRelation
 from treesearch.tree import Document
 
 
+GRAPHRAG_METHODS = ("graphrag", "graphrag_no_structure", "graphrag_no_entity")
 DEFAULT_METHODS = ("treesearch", "fts5", "dense", "hybrid", "graphrag")
+SUPPORTED_METHODS = ("treesearch", "fts5", "dense", "hybrid", *GRAPHRAG_METHODS)
 K_VALUES = (1, 2, 5, 10)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT / "evaluation" / "data"
@@ -116,11 +118,16 @@ class EmbeddingCache:
 class PublicQATripletExtractor:
     """Lightweight graph extractor for title/entity public-QA passages."""
 
+    def __init__(self, include_entity_mentions: bool = True):
+        self.include_entity_mentions = include_entity_mentions
+
     def extract(self, passage: GraphNodePassage) -> list[GraphRelation]:
         title = passage.title.strip()
         if not title:
             return []
-        entities = [title, *_entity_mentions(passage.text)]
+        entities = [title]
+        if self.include_entity_mentions:
+            entities.extend(_entity_mentions(passage.text))
         relations = []
         for entity in dict.fromkeys(entities):
             text = f"{title} mentions {entity}"
@@ -180,7 +187,7 @@ def evaluate_public_qa(
         )
         cache_path = embedding_cache_path or DEFAULT_OUTPUT_DIR / f"zhipu_embeddings_{dataset_name}.json"
         dense_index = build_dense_index(corpus_rows, client, EmbeddingCache(cache_path))
-    graphrag = build_public_graphrag(tree_search, top_k) if "graphrag" in selected_methods else None
+    graphrags = build_public_graphrags(tree_search, top_k, selected_methods)
 
     rows = []
     summary = {}
@@ -193,7 +200,7 @@ def evaluate_public_qa(
             dense_index=dense_index,
             fts_index=fts_index,
             corpus_lookup=corpus_lookup,
-            graphrag=graphrag,
+            graphrags=graphrags,
             top_k=top_k,
         )
         rows.extend(method_rows)
@@ -206,6 +213,7 @@ def evaluate_public_qa(
         "methods": list(selected_methods),
         "summary": summary,
         "rows": rows,
+        "ablation_groups": build_ablation_groups(selected_methods),
     }
 
     if output_path is not None:
@@ -310,14 +318,39 @@ def embed_batch_with_retry(
     raise RuntimeError("unreachable embedding retry state")
 
 
-def build_public_graphrag(tree_search: TreeSearch, top_k: int) -> TreeSearchGraphRAG:
+def build_public_graphrags(
+    tree_search: TreeSearch,
+    top_k: int,
+    methods: tuple[str, ...],
+) -> dict[str, TreeSearchGraphRAG]:
+    return {
+        method: build_public_graphrag(tree_search, top_k, method)
+        for method in methods
+        if method in GRAPHRAG_METHODS
+    }
+
+
+def build_public_graphrag(tree_search: TreeSearch, top_k: int, method: str = "graphrag") -> TreeSearchGraphRAG:
+    no_structure = method == "graphrag_no_structure"
+    no_entity = method == "graphrag_no_entity"
     rag = TreeSearchGraphRAG.from_tree_search(
         tree_search,
-        extractor=PublicQATripletExtractor(),
-        expansion_config=ExpansionConfig(max_relations=max(top_k * 3, 30), max_hops=1),
+        extractor=PublicQATripletExtractor(include_entity_mentions=not no_entity),
+        expansion_config=ExpansionConfig(
+            max_relations=max(top_k * 3, 30),
+            max_hops=0 if no_structure else 1,
+            structure_weight=0.0 if no_structure else 1.0,
+        ),
     )
     rag.build_graph()
     return rag
+
+
+def build_ablation_groups(methods: tuple[str, ...]) -> dict[str, list[str]]:
+    graphrag_methods = [method for method in methods if method in GRAPHRAG_METHODS]
+    if not graphrag_methods:
+        return {}
+    return {"public_graphrag": graphrag_methods}
 
 
 def iter_corpus_rows(dataset_name: str, corpus: object) -> Iterable[dict]:
@@ -353,14 +386,14 @@ def evaluate_method(
     dense_index: list[dict],
     fts_index: FTS5Index,
     corpus_lookup: dict[str, str],
-    graphrag: TreeSearchGraphRAG | None,
+    graphrags: dict[str, TreeSearchGraphRAG],
     top_k: int,
 ) -> tuple[list[dict], float]:
     started = time.perf_counter()
     rows = []
     for sample in questions:
         query = str(sample["question"])
-        retrieved = retrieve(method, query, tree_search, dense_index, fts_index, graphrag, top_k)
+        retrieved = retrieve(method, query, tree_search, dense_index, fts_index, graphrags, top_k)
         gold = gold_items(sample, dataset_name)
         metrics = retrieval_metrics(gold, retrieved)
         predicted_answer = select_predicted_answer(query, retrieved, corpus_lookup)
@@ -387,7 +420,7 @@ def retrieve(
     tree_search: TreeSearch,
     dense_index: list[dict],
     fts_index: FTS5Index,
-    graphrag: TreeSearchGraphRAG | None,
+    graphrags: dict[str, TreeSearchGraphRAG],
     top_k: int,
 ) -> list[str]:
     if method == "treesearch":
@@ -400,7 +433,8 @@ def retrieve(
         sparse = sparse_retrieve(tree_search, query, top_k, search_mode="auto")
         dense = dense_retrieve(dense_index, query, top_k)
         return rrf_merge(sparse, dense, top_k)
-    if method == "graphrag":
+    if method in GRAPHRAG_METHODS:
+        graphrag = graphrags.get(method)
         if graphrag is None:
             raise ValueError("graphrag method requires a TreeSearchGraphRAG instance")
         return graphrag_retrieve(graphrag, tree_search, query, top_k)
@@ -664,7 +698,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate TreeSearch retrieval on public multi-hop QA datasets.")
     parser.add_argument("--dataset", default="test_sample", choices=["test_sample", "hotpotqa", "musique", "2wikimultihopqa"])
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
-    parser.add_argument("--methods", nargs="+", default=list(DEFAULT_METHODS), choices=list(DEFAULT_METHODS))
+    parser.add_argument("--methods", nargs="+", default=list(DEFAULT_METHODS), choices=list(SUPPORTED_METHODS))
     parser.add_argument("--max-samples", type=int, default=50)
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--output", type=Path)
