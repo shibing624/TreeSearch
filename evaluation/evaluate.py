@@ -10,23 +10,132 @@ test_sample fixture.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import time
-from collections import Counter
+import urllib.request
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Protocol
 
-from treesearch import TreeSearch
+from treesearch import TreeSearch, TreeSearchGraphRAG
 from treesearch.fts import FTS5Index
+from treesearch.rag import ExpansionConfig
+from treesearch.rag.llm import load_env_file
+from treesearch.rag.models import GraphNodePassage, GraphRelation
 from treesearch.tree import Document
 
 
-DEFAULT_METHODS = ("treesearch", "fts5", "dense", "hybrid")
+DEFAULT_METHODS = ("treesearch", "fts5", "dense", "hybrid", "graphrag")
 K_VALUES = (1, 2, 5, 10)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = REPO_ROOT / "evaluation" / "data"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
+DEFAULT_EMBEDDING_DIMENSIONS = 512
+ZHIPU_API_KEY_ENV = "ZHIPU_API_KEY"
+
+
+class EmbeddingClient(Protocol):
+    def embed(self, texts: list[str], batch_size: int = 10) -> list[list[float]]:
+        ...
+
+
+class ZhipuEmbeddingClient:
+    """Zhipu BigModel embedding-3 API client."""
+
+    API_URL = "https://open.bigmodel.cn/api/paas/v4/embeddings"
+
+    def __init__(
+        self,
+        api_key: str = "",
+        model: str = "embedding-3",
+        dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS,
+        env_path: str | Path | None = None,
+    ):
+        env = load_env_file(env_path or REPO_ROOT / ".env")
+        self.api_key = api_key or env.get(ZHIPU_API_KEY_ENV) or os.getenv(ZHIPU_API_KEY_ENV, "")
+        self.model = model
+        self.dimensions = dimensions
+        if not self.api_key:
+            raise ValueError(
+                f"Zhipu API key not set. Please set {ZHIPU_API_KEY_ENV} in environment or repo .env."
+            )
+
+    def embed(self, texts: list[str], batch_size: int = 10) -> list[list[float]]:
+        if not texts:
+            return []
+        max_chars = 8000
+        embeddings = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            batch = [text[:max_chars].strip() if text.strip() else " " for text in batch]
+            payload = json.dumps(
+                {
+                    "model": self.model,
+                    "input": batch,
+                    "dimensions": self.dimensions,
+                }
+            ).encode("utf-8")
+            request = urllib.request.Request(
+                self.API_URL,
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=60) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            embeddings.extend([item["embedding"] for item in result["data"]])
+        return embeddings
+
+
+class EmbeddingCache:
+    def __init__(self, path: Path | None):
+        self.path = path
+        self.values: dict[str, list[float]] = {}
+        if self.path is not None and self.path.exists():
+            self.values = json.loads(self.path.read_text(encoding="utf-8"))
+
+    def get(self, key: str) -> list[float] | None:
+        return self.values.get(key)
+
+    def set(self, key: str, vector: list[float]) -> None:
+        self.values[key] = vector
+
+    def save(self) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self.values), encoding="utf-8")
+
+
+class PublicQATripletExtractor:
+    """Lightweight graph extractor for title/entity public-QA passages."""
+
+    def extract(self, passage: GraphNodePassage) -> list[GraphRelation]:
+        title = passage.title.strip()
+        if not title:
+            return []
+        entities = [title, *_entity_mentions(passage.text)]
+        relations = []
+        for entity in dict.fromkeys(entities):
+            text = f"{title} mentions {entity}"
+            relations.append(
+                GraphRelation(
+                    relation_id=_public_relation_id(passage.graph_node_id, text),
+                    subject=title,
+                    predicate="mentions",
+                    object=entity,
+                    text=text,
+                    node_id=passage.node_id,
+                    doc_id=passage.doc_id,
+                    source_type=passage.source_type,
+                )
+            )
+        return relations
 
 
 def load_dataset(dataset_name: str, data_dir: Path = DEFAULT_DATA_DIR) -> tuple[list[dict], object]:
@@ -48,16 +157,33 @@ def evaluate_public_qa(
     top_k: int = 10,
     output_path: Path | None = None,
     markdown_path: Path | None = None,
+    embedding_client: EmbeddingClient | None = None,
+    embedding_cache_path: Path | None = None,
+    zhipu_api_key: str = "",
+    zhipu_model: str = "embedding-3",
+    zhipu_dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS,
 ) -> dict:
     questions, corpus = load_dataset(dataset_name, data_dir)
+    selected_methods = tuple(methods)
     selected_questions = questions[:max_samples] if max_samples is not None else questions
-    documents, dense_index, fts_index = build_corpus_index(dataset_name, corpus)
+    documents, corpus_rows, fts_index = build_corpus_index(dataset_name, corpus)
+    corpus_lookup = {row["retrieval_key"]: row["text"] for row in corpus_rows}
     tree_search = TreeSearch(db_path=None)
     tree_search.documents = documents
+    dense_index = []
+    if _needs_embedding(selected_methods):
+        client = embedding_client or ZhipuEmbeddingClient(
+            api_key=zhipu_api_key,
+            model=zhipu_model,
+            dimensions=zhipu_dimensions,
+        )
+        cache_path = embedding_cache_path or DEFAULT_OUTPUT_DIR / f"zhipu_embeddings_{dataset_name}.json"
+        dense_index = build_dense_index(corpus_rows, client, EmbeddingCache(cache_path))
+    graphrag = build_public_graphrag(tree_search, top_k) if "graphrag" in selected_methods else None
 
     rows = []
     summary = {}
-    for method in methods:
+    for method in selected_methods:
         method_rows, elapsed = evaluate_method(
             method=method,
             questions=selected_questions,
@@ -65,6 +191,8 @@ def evaluate_public_qa(
             tree_search=tree_search,
             dense_index=dense_index,
             fts_index=fts_index,
+            corpus_lookup=corpus_lookup,
+            graphrag=graphrag,
             top_k=top_k,
         )
         rows.extend(method_rows)
@@ -74,7 +202,7 @@ def evaluate_public_qa(
         "dataset": dataset_name,
         "num_questions": len(selected_questions),
         "num_corpus_docs": len(documents),
-        "methods": list(methods),
+        "methods": list(selected_methods),
         "summary": summary,
         "rows": rows,
     }
@@ -112,19 +240,60 @@ def build_corpus_index(dataset_name: str, corpus: object) -> tuple[list[Document
         )
         for idx, row in enumerate(rows)
     ]
-    dense_index = [
+    fts_index = FTS5Index(db_path=None)
+    for document in documents:
+        fts_index.index_document(document)
+    return documents, rows, fts_index
+
+
+def build_dense_index(
+    corpus_rows: list[dict],
+    embedding_client: EmbeddingClient,
+    embedding_cache: EmbeddingCache,
+    batch_size: int = 10,
+) -> list[dict]:
+    texts = [" ".join([row["title"], row["text"]]) for row in corpus_rows]
+    vectors = embed_with_cache(texts, embedding_client, embedding_cache, batch_size=batch_size)
+    return [
         {
             "retrieval_key": row["retrieval_key"],
             "title": row["title"],
             "text": row["text"],
-            "vector": term_vector(" ".join([row["title"], row["text"]])),
+            "vector": vector,
+            "embedding_client": embedding_client,
+            "embedding_cache": embedding_cache,
         }
-        for row in rows
+        for row, vector in zip(corpus_rows, vectors)
     ]
-    fts_index = FTS5Index(db_path=None)
-    for document in documents:
-        fts_index.index_document(document)
-    return documents, dense_index, fts_index
+
+
+def embed_with_cache(
+    texts: list[str],
+    embedding_client: EmbeddingClient,
+    embedding_cache: EmbeddingCache,
+    batch_size: int = 10,
+) -> list[list[float]]:
+    keys = [_embedding_key(text) for text in texts]
+    vectors: list[list[float] | None] = [embedding_cache.get(key) for key in keys]
+    missing_indexes = [idx for idx, vector in enumerate(vectors) if vector is None]
+    if missing_indexes:
+        missing_texts = [texts[idx] for idx in missing_indexes]
+        embedded = embedding_client.embed(missing_texts, batch_size=batch_size)
+        for idx, vector in zip(missing_indexes, embedded):
+            vectors[idx] = vector
+            embedding_cache.set(keys[idx], vector)
+        embedding_cache.save()
+    return [vector for vector in vectors if vector is not None]
+
+
+def build_public_graphrag(tree_search: TreeSearch, top_k: int) -> TreeSearchGraphRAG:
+    rag = TreeSearchGraphRAG.from_tree_search(
+        tree_search,
+        extractor=PublicQATripletExtractor(),
+        expansion_config=ExpansionConfig(max_relations=max(top_k * 3, 30), max_hops=1),
+    )
+    rag.build_graph()
+    return rag
 
 
 def iter_corpus_rows(dataset_name: str, corpus: object) -> Iterable[dict]:
@@ -159,23 +328,30 @@ def evaluate_method(
     tree_search: TreeSearch,
     dense_index: list[dict],
     fts_index: FTS5Index,
+    corpus_lookup: dict[str, str],
+    graphrag: TreeSearchGraphRAG | None,
     top_k: int,
 ) -> tuple[list[dict], float]:
     started = time.perf_counter()
     rows = []
     for sample in questions:
         query = str(sample["question"])
-        retrieved = retrieve(method, query, tree_search, dense_index, fts_index, top_k)
+        retrieved = retrieve(method, query, tree_search, dense_index, fts_index, graphrag, top_k)
         gold = gold_items(sample, dataset_name)
         metrics = retrieval_metrics(gold, retrieved)
+        predicted_answer = select_predicted_answer(query, retrieved, corpus_lookup)
+        answer_side = answer_metrics(str(sample.get("answer", "")), predicted_answer)
         rows.append(
             {
                 "method": method,
                 "query_id": str(sample.get("_id") or sample.get("id") or len(rows)),
                 "query": query,
+                "gold_answer": str(sample.get("answer", "")),
+                "predicted_answer": predicted_answer,
                 "gold": sorted(gold),
                 "retrieved": retrieved,
                 **metrics,
+                **answer_side,
             }
         )
     return rows, time.perf_counter() - started
@@ -187,6 +363,7 @@ def retrieve(
     tree_search: TreeSearch,
     dense_index: list[dict],
     fts_index: FTS5Index,
+    graphrag: TreeSearchGraphRAG | None,
     top_k: int,
 ) -> list[str]:
     if method == "treesearch":
@@ -199,6 +376,10 @@ def retrieve(
         sparse = sparse_retrieve(tree_search, query, top_k, search_mode="auto")
         dense = dense_retrieve(dense_index, query, top_k)
         return rrf_merge(sparse, dense, top_k)
+    if method == "graphrag":
+        if graphrag is None:
+            raise ValueError("graphrag method requires a TreeSearchGraphRAG instance")
+        return graphrag_retrieve(graphrag, tree_search, query, top_k)
     raise ValueError(f"unsupported method: {method}")
 
 
@@ -236,12 +417,32 @@ def fts_retrieve(fts_index: FTS5Index, documents: list[Document], query: str, to
 
 
 def dense_retrieve(dense_index: list[dict], query: str, top_k: int) -> list[str]:
-    query_vector = term_vector(query)
+    if not dense_index:
+        raise ValueError("dense retrieval requires an embedding index")
+    embedding_client = dense_index[0]["embedding_client"]
+    embedding_cache = dense_index[0]["embedding_cache"]
+    query_vector = embed_with_cache([query], embedding_client, embedding_cache)[0]
     scored = sorted(
         dense_index,
         key=lambda item: (-cosine(query_vector, item["vector"]), item["retrieval_key"]),
     )
     return [str(item["retrieval_key"]) for item in scored[:top_k]]
+
+
+def graphrag_retrieve(
+    graphrag: TreeSearchGraphRAG,
+    tree_search: TreeSearch,
+    query: str,
+    top_k: int,
+) -> list[str]:
+    answer = graphrag.query(query)
+    retrieved = []
+    for citation in answer.evidence_chain.citations:
+        if citation.source_path and citation.source_path not in retrieved:
+            retrieved.append(citation.source_path)
+    if not retrieved:
+        return sparse_retrieve(tree_search, query, top_k, search_mode="auto")
+    return retrieved[:top_k]
 
 
 def rrf_merge(left: list[str], right: list[str], top_k: int, k: int = 60) -> list[str]:
@@ -282,6 +483,34 @@ def retrieval_metrics(gold: set[str], retrieved: list[str]) -> dict:
     return metrics
 
 
+def answer_metrics(gold_answer: str, predicted_answer: str) -> dict:
+    normalized_gold = normalize_answer(gold_answer)
+    normalized_predicted = normalize_answer(predicted_answer)
+    exact_match = 1.0 if normalized_gold and normalized_gold == normalized_predicted else 0.0
+    accuracy = 1.0 if normalized_gold and normalized_gold in normalized_predicted else exact_match
+    return {
+        "answer_exact_match": exact_match,
+        "answer_accuracy": accuracy,
+        "answer_f1": token_f1(normalized_gold, normalized_predicted),
+    }
+
+
+def select_predicted_answer(query: str, retrieved: list[str], corpus_lookup: dict[str, str]) -> str:
+    query_terms = set(tokenize(normalize_answer(query)))
+    best_sentence = ""
+    best_score = -1.0
+    for retrieval_key in retrieved:
+        for sentence in split_sentences(corpus_lookup.get(retrieval_key, "")):
+            sentence_terms = set(tokenize(normalize_answer(sentence)))
+            if not sentence_terms:
+                continue
+            score = len(query_terms & sentence_terms) / max(len(query_terms), 1)
+            if score > best_score:
+                best_score = score
+                best_sentence = sentence
+    return best_sentence
+
+
 def recall_at_k(gold: set[str], retrieved: list[str], k: int) -> float:
     if not gold:
         return 0.0
@@ -304,7 +533,12 @@ def summarize_rows(rows: list[dict], elapsed: float) -> dict:
         "latency_seconds": elapsed,
         "avg_latency_seconds": elapsed / count if count else 0.0,
     }
-    for key in [f"recall@{k}" for k in K_VALUES] + [f"hit@{k}" for k in K_VALUES] + ["mrr"]:
+    metric_keys = (
+        [f"recall@{k}" for k in K_VALUES]
+        + [f"hit@{k}" for k in K_VALUES]
+        + ["mrr", "answer_exact_match", "answer_accuracy", "answer_f1"]
+    )
+    for key in metric_keys:
         summary[key] = sum(float(row[key]) for row in rows) / count if count else 0.0
     return summary
 
@@ -316,18 +550,20 @@ def format_markdown(report: dict) -> str:
         f"- Questions: {report['num_questions']}",
         f"- Corpus docs: {report['num_corpus_docs']}",
         "",
-        "| Method | Recall@1 | Recall@2 | Recall@5 | Recall@10 | MRR | Avg latency (s) |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Method | Recall@1 | Recall@2 | Recall@5 | Recall@10 | MRR | Acc | F1 | Avg latency (s) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for method, row in report["summary"].items():
         lines.append(
-            "| {method} | {r1:.3f} | {r2:.3f} | {r5:.3f} | {r10:.3f} | {mrr:.3f} | {lat:.4f} |".format(
+            "| {method} | {r1:.3f} | {r2:.3f} | {r5:.3f} | {r10:.3f} | {mrr:.3f} | {acc:.3f} | {f1:.3f} | {lat:.4f} |".format(
                 method=method,
                 r1=row["recall@1"],
                 r2=row["recall@2"],
                 r5=row["recall@5"],
                 r10=row["recall@10"],
                 mrr=row["mrr"],
+                acc=row["answer_accuracy"],
+                f1=row["answer_f1"],
                 lat=row["avg_latency_seconds"],
             )
         )
@@ -335,19 +571,69 @@ def format_markdown(report: dict) -> str:
     return "\n".join(lines)
 
 
-def term_vector(text: str) -> Counter:
-    return Counter(term.casefold() for term in re.findall(r"[\w_]+", text))
-
-
-def cosine(left: Counter, right: Counter) -> float:
+def cosine(left: list[float], right: list[float]) -> float:
     if not left or not right:
         return 0.0
-    dot = sum(left[token] * right[token] for token in left.keys() & right.keys())
-    left_norm = sum(value * value for value in left.values()) ** 0.5
-    right_norm = sum(value * value for value in right.values()) ** 0.5
+    dot = sum(left_value * right_value for left_value, right_value in zip(left, right))
+    left_norm = sum(value * value for value in left) ** 0.5
+    right_norm = sum(value * value for value in right) ** 0.5
     if left_norm == 0.0 or right_norm == 0.0:
         return 0.0
     return dot / (left_norm * right_norm)
+
+
+def token_f1(normalized_gold: str, normalized_predicted: str) -> float:
+    gold_tokens = tokenize(normalized_gold)
+    predicted_tokens = tokenize(normalized_predicted)
+    if not gold_tokens or not predicted_tokens:
+        return 0.0
+    gold_counts = token_counts(gold_tokens)
+    predicted_counts = token_counts(predicted_tokens)
+    overlap = sum(min(count, predicted_counts.get(token, 0)) for token, count in gold_counts.items())
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(predicted_tokens)
+    recall = overlap / len(gold_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def token_counts(tokens: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for token in tokens:
+        counts[token] = counts.get(token, 0) + 1
+    return counts
+
+
+def normalize_answer(text: str) -> str:
+    return " ".join(tokenize(text.casefold()))
+
+
+def tokenize(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.casefold())
+
+
+def split_sentences(text: str) -> list[str]:
+    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", text) if sentence.strip()]
+    return sentences or ([text.strip()] if text.strip() else [])
+
+
+def _needs_embedding(methods: tuple[str, ...]) -> bool:
+    return any(method in {"dense", "hybrid"} for method in methods)
+
+
+def _embedding_key(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _entity_mentions(text: str) -> list[str]:
+    matches = re.findall(r"\b[A-Z][A-Za-z0-9]*(?:\s+[A-Z][A-Za-z0-9]*){0,4}\b", text)
+    blocked = {"The", "This", "It", "He", "She", "They", "In", "On", "At", "A", "An"}
+    return [match for match in matches[:30] if match not in blocked]
+
+
+def _public_relation_id(graph_node_id: str, text: str) -> str:
+    payload = f"{graph_node_id}:{text}"
+    return hashlib.blake2b(payload.encode("utf-8"), digest_size=8).hexdigest()
 
 
 def parse_args() -> argparse.Namespace:
@@ -359,6 +645,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--markdown-output", type=Path)
+    parser.add_argument("--embedding-cache-path", type=Path)
+    parser.add_argument("--zhipu-api-key", default="")
+    parser.add_argument("--zhipu-model", default="embedding-3")
+    parser.add_argument("--zhipu-dimensions", type=int, default=DEFAULT_EMBEDDING_DIMENSIONS)
     return parser.parse_args()
 
 
@@ -374,6 +664,10 @@ def main() -> None:
         top_k=args.top_k,
         output_path=output,
         markdown_path=markdown,
+        embedding_cache_path=args.embedding_cache_path,
+        zhipu_api_key=args.zhipu_api_key,
+        zhipu_model=args.zhipu_model,
+        zhipu_dimensions=args.zhipu_dimensions,
     )
     print(format_markdown(report))
     print(f"Saved JSON: {output}")
