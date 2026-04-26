@@ -2,8 +2,11 @@
 """Tests for public multi-hop QA evaluation harness."""
 
 from pathlib import Path
+import urllib.error
 
-from evaluation.evaluate import answer_metrics, evaluate_public_qa, load_dataset
+import pytest
+
+from evaluation.evaluate import EmbeddingCache, answer_metrics, embed_with_cache, evaluate_public_qa, load_dataset
 
 
 class FakeEmbeddingClient:
@@ -79,3 +82,49 @@ def test_dense_retrieval_uses_embedding_client(tmp_path):
     assert embedding_client.calls
     assert report["summary"]["dense"]["answer_accuracy"] >= 0.0
     assert (tmp_path / "zhipu_cache.json").exists()
+
+
+def test_embedding_cache_persists_completed_batches_before_api_failure(tmp_path):
+    class FlakyEmbeddingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def embed(self, texts: list[str], batch_size: int = 10) -> list[list[float]]:
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("transient api failure")
+            return [[float(len(text))] for text in texts]
+
+    cache_path = tmp_path / "embeddings.json"
+    cache = EmbeddingCache(cache_path)
+
+    with pytest.raises(RuntimeError, match="transient api failure"):
+        embed_with_cache(["alpha", "beta", "gamma"], FlakyEmbeddingClient(), cache, batch_size=2)
+
+    assert cache_path.exists()
+    restored = EmbeddingCache(cache_path)
+    assert len(restored.values) == 2
+
+
+def test_embedding_cache_retries_transient_url_errors(tmp_path):
+    class RetryEmbeddingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def embed(self, texts: list[str], batch_size: int = 10) -> list[list[float]]:
+            self.calls += 1
+            if self.calls == 1:
+                raise urllib.error.URLError("transient ssl eof")
+            return [[float(len(text))] for text in texts]
+
+    client = RetryEmbeddingClient()
+    vectors = embed_with_cache(
+        ["alpha", "beta"],
+        client,
+        EmbeddingCache(tmp_path / "embeddings.json"),
+        batch_size=2,
+        max_retries=1,
+    )
+
+    assert client.calls == 2
+    assert vectors == [[5.0], [4.0]]

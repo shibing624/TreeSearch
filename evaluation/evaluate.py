@@ -15,6 +15,7 @@ import json
 import os
 import re
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Iterable, Protocol
@@ -250,7 +251,7 @@ def build_dense_index(
     corpus_rows: list[dict],
     embedding_client: EmbeddingClient,
     embedding_cache: EmbeddingCache,
-    batch_size: int = 10,
+    batch_size: int = 64,
 ) -> list[dict]:
     texts = [" ".join([row["title"], row["text"]]) for row in corpus_rows]
     vectors = embed_with_cache(texts, embedding_client, embedding_cache, batch_size=batch_size)
@@ -272,18 +273,41 @@ def embed_with_cache(
     embedding_client: EmbeddingClient,
     embedding_cache: EmbeddingCache,
     batch_size: int = 10,
+    max_retries: int = 2,
 ) -> list[list[float]]:
     keys = [_embedding_key(text) for text in texts]
     vectors: list[list[float] | None] = [embedding_cache.get(key) for key in keys]
     missing_indexes = [idx for idx, vector in enumerate(vectors) if vector is None]
-    if missing_indexes:
-        missing_texts = [texts[idx] for idx in missing_indexes]
-        embedded = embedding_client.embed(missing_texts, batch_size=batch_size)
-        for idx, vector in zip(missing_indexes, embedded):
+    for start in range(0, len(missing_indexes), batch_size):
+        batch_indexes = missing_indexes[start:start + batch_size]
+        batch_texts = [texts[idx] for idx in batch_indexes]
+        embedded = embed_batch_with_retry(
+            embedding_client,
+            batch_texts,
+            batch_size=batch_size,
+            max_retries=max_retries,
+        )
+        for idx, vector in zip(batch_indexes, embedded):
             vectors[idx] = vector
             embedding_cache.set(keys[idx], vector)
         embedding_cache.save()
     return [vector for vector in vectors if vector is not None]
+
+
+def embed_batch_with_retry(
+    embedding_client: EmbeddingClient,
+    texts: list[str],
+    batch_size: int,
+    max_retries: int,
+) -> list[list[float]]:
+    for attempt in range(max_retries + 1):
+        try:
+            return embedding_client.embed(texts, batch_size=batch_size)
+        except (TimeoutError, urllib.error.URLError):
+            if attempt >= max_retries:
+                raise
+            time.sleep(min(2 ** attempt, 5))
+    raise RuntimeError("unreachable embedding retry state")
 
 
 def build_public_graphrag(tree_search: TreeSearch, top_k: int) -> TreeSearchGraphRAG:
