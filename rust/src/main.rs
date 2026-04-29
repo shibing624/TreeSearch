@@ -11,6 +11,7 @@ use treesearch::engine::fts::FTS5Index;
 use treesearch::engine::indexer::{self};
 use treesearch::engine::search;
 use treesearch::output::{self, OutputFormat};
+use treesearch::tokenizer::cjk;
 
 /// treesearch — structure-aware document search
 #[derive(Parser)]
@@ -146,6 +147,9 @@ fn run(cli: Cli) -> Result<()> {
             ModeChoice::Tree => SearchMode::Tree,
         };
     }
+
+    // Apply jieba custom dictionary (no-op if none configured).
+    cjk::configure_from(&config);
     let regex = cli.regex;
     let fts_expression = cli.fts_expression.clone();
     let query = cli.query.clone();

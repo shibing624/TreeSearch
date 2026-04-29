@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 
 /// Unified configuration for TreeSearch Rust CLI.
 ///
@@ -38,6 +39,20 @@ pub struct TreeSearchConfig {
 
     // Tokenizer
     pub cjk_tokenizer: CjkTokenizerMode,
+
+    // Jieba custom dictionary (improves Chinese retrieval accuracy for
+    // domain-specific terms / brand names / multi-word entities).
+    //   - `jieba_user_dict_paths`: file paths in jieba dict format
+    //                              (one entry per line: "word [freq] [tag]")
+    //   - `jieba_user_words`: in-memory entries; each string is parsed as
+    //                        "word [freq] [tag]" with freq/tag optional, so
+    //                        plain `"石墨烯"` works just like `add_word("石墨烯")`
+    //   - `jieba_del_words`: words to suppress. jieba-rs has no `del_word`,
+    //                       so we emulate via `add_word(w, Some(0), None)`
+    //                       which makes the entry weight-zero.
+    pub jieba_user_dict_paths: Vec<PathBuf>,
+    pub jieba_user_words: Vec<String>,
+    pub jieba_del_words: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +131,10 @@ impl Default for TreeSearchConfig {
             path_top_k: 3,
 
             cjk_tokenizer: CjkTokenizerMode::Auto,
+
+            jieba_user_dict_paths: Vec::new(),
+            jieba_user_words: Vec::new(),
+            jieba_del_words: Vec::new(),
         }
     }
 }
@@ -140,6 +159,37 @@ impl TreeSearchConfig {
             if let Ok(n) = v.parse() {
                 config.top_k_docs = n;
             }
+        }
+
+        // Jieba user dict — paths separated by `:` (POSIX) / `;` (Windows)
+        // via std::env::split_paths; commas are also tolerated for parity
+        // with the Python version.
+        if let Ok(v) = env::var("TREESEARCH_JIEBA_USER_DICT") {
+            let mut paths = Vec::new();
+            for chunk in env::split_paths(&v) {
+                let chunk_str = chunk.to_string_lossy().to_string();
+                for piece in chunk_str.split(',') {
+                    let trimmed = piece.trim();
+                    if !trimmed.is_empty() {
+                        paths.push(PathBuf::from(trimmed));
+                    }
+                }
+            }
+            config.jieba_user_dict_paths = paths;
+        }
+        if let Ok(v) = env::var("TREESEARCH_JIEBA_USER_WORDS") {
+            config.jieba_user_words = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Ok(v) = env::var("TREESEARCH_JIEBA_DEL_WORDS") {
+            config.jieba_del_words = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
 
         config
