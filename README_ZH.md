@@ -245,7 +245,7 @@ TreeSearch：
 - **PDF/DOCX/HTML 解析器** — 可选解析器，通过 `PyMuPDF`、`python-docx`、`beautifulsoup4` 实现（`pip install pytreesearch[all]`）
 - **GrepFilter 精准匹配** — 支持字面量/正则表达式匹配，精准定位代码符号和关键词
 - **Source-type 路由** — 根据文件类型自动选择预过滤器（如代码文件使用 GrepFilter + FTS5）
-- **中英文支持** — 内置 jieba 中文分词和英文正则分词
+- **中英文支持** — 内置 jieba 中文分词和英文正则分词；支持自定义词表（`jieba_user_dict_paths` / `jieba_user_words` 或环境变量 `TREESEARCH_JIEBA_USER_DICT` / `TREESEARCH_JIEBA_USER_WORDS`）显著提升领域术语检索准确率
 - **批量索引** — `build_index()` 支持 glob 模式、文件路径和目录，并发多文件处理
 - **异步优先** — 所有核心函数均为异步，提供同步适配器
 - **配置驱动默认值** — `search()` 和 `build_index()` 从 `get_config()` 读取默认值，支持按调用覆盖

@@ -9,12 +9,12 @@ Priority (high -> low):
     3. Built-in defaults
 
 Environment variables:
-    Tokenizer: TREESEARCH_CJK_TOKENIZER
+    Tokenizer: TREESEARCH_CJK_TOKENIZER, TREESEARCH_JIEBA_USER_DICT
 """
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,9 @@ INDEX_SCHEMA_VERSION = "2"
 _ENV_CJK_TOKENIZER = "TREESEARCH_CJK_TOKENIZER"
 _ENV_FINGERPRINT_MODE = "TREESEARCH_FINGERPRINT_MODE"
 _ENV_PRUNE = "TREESEARCH_PRUNE"
+_ENV_JIEBA_USER_DICT = "TREESEARCH_JIEBA_USER_DICT"
+_ENV_JIEBA_USER_WORDS = "TREESEARCH_JIEBA_USER_WORDS"
+_ENV_JIEBA_DEL_WORDS = "TREESEARCH_JIEBA_DEL_WORDS"
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +93,19 @@ class TreeSearchConfig:
     # Tokenizer
     cjk_tokenizer: str = "auto"  # "auto" | "jieba" | "bigram" | "char"
 
+    # Jieba custom dictionary support (improves Chinese retrieval accuracy
+    # for domain-specific terms, brand names, multi-word entities, etc.).
+    # `jieba_user_dict_paths` are file paths in jieba dict format
+    #   (one entry per line: "word [freq] [tag]"; freq/tag optional).
+    # `jieba_user_words` are in-memory entries. Each string is parsed as
+    #   "word [freq] [tag]" — `freq` and `tag` are both optional, so
+    #   plain `"石墨烯"` works just like `jieba.add_word("石墨烯")`.
+    # `jieba_del_words` are words to remove via `jieba.del_word(...)`.
+    # All are applied lazily on first jieba use; changes trigger reload.
+    jieba_user_dict_paths: List[str] = field(default_factory=list)
+    jieba_user_words: List[str] = field(default_factory=list)
+    jieba_del_words: List[str] = field(default_factory=list)
+
     # Incremental indexing
     fingerprint_mode: Literal["stat", "content"] = "stat"
     # "stat":    fast `(mtime_ns:size)` fingerprint. Re-indexes after a `touch`.
@@ -123,6 +139,24 @@ class TreeSearchConfig:
         env_prune = os.getenv(_ENV_PRUNE)
         if env_prune is not None:
             config.prune_orphans_on_directory = env_prune.lower() in ("1", "true", "yes")
+
+        env_dict = os.getenv(_ENV_JIEBA_USER_DICT)
+        if env_dict:
+            # Support both os.pathsep (':' on POSIX, ';' on Windows) and ','.
+            parts = []
+            for chunk in env_dict.split(os.pathsep):
+                parts.extend(p.strip() for p in chunk.split(",") if p.strip())
+            config.jieba_user_dict_paths = parts
+
+        env_words = os.getenv(_ENV_JIEBA_USER_WORDS)
+        if env_words:
+            # Comma-separated entries; each entry may itself contain
+            # whitespace-separated "word [freq] [tag]".
+            config.jieba_user_words = [w.strip() for w in env_words.split(",") if w.strip()]
+
+        env_del = os.getenv(_ENV_JIEBA_DEL_WORDS)
+        if env_del:
+            config.jieba_del_words = [w.strip() for w in env_del.split(",") if w.strip()]
 
         return config
 

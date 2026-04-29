@@ -27,12 +27,14 @@ def _isolate_env_and_config():
     """Remove .env-injected vars before each test, restore after."""
     from treesearch.config import reset_config
     from treesearch.fts import reset_fts_index
+    from treesearch.tokenizer import reset_jieba
     saved = {}
     for k in list(os.environ):
         if k.startswith(_ENV_PREFIXES):
             saved[k] = os.environ.pop(k)
     reset_config()
     reset_fts_index()
+    reset_jieba()
     yield
     # Restore
     for k in list(os.environ):
@@ -41,6 +43,7 @@ def _isolate_env_and_config():
     os.environ.update(saved)
     reset_config()
     reset_fts_index()
+    reset_jieba()
 
 
 @pytest.fixture
